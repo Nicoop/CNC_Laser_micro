@@ -84,7 +84,10 @@ static volatile bool alarm_message_pending = false;
 typedef struct {
     bool valid;
     float target_x, target_y, feed;
-    float dir_x, dir_y;   /* signo normalizado del movimiento: -1, 0, +1 */
+    float dir_x, dir_y;
+    bool is_rapid;        /* true = era un G0, apagar el láser al ejecutar */
+    bool has_laser_s;     /* true = esta línea traía S */
+    float laser_s;        /* el valor de S a aplicar justo al ejecutar */
 } PendingMove;
 static PendingMove g_pending = {0};
 static uint32_t g_last_line_tick = 0;
@@ -623,10 +626,17 @@ static void flush_pending_move(bool exit_at_cruise)
 {
     if (!g_pending.valid) return;
     static bool last_entered_at_cruise = false;
-    motors_enable(); /* por si estaban desactivados (m84), los reactivo antes de intentar mover */
+
+    if (g_pending.is_rapid) {
+        laser_force_off_for_rapid();
+    } else if (g_pending.has_laser_s) {
+        laser_set_power(g_pending.laser_s);
+    }
+
+    motors_enable();
     stepper_move_to(g_pending.target_x, g_pending.target_y, g_pending.feed,
                      last_entered_at_cruise, exit_at_cruise);
-    last_entered_at_cruise = exit_at_cruise; /* el próximo entra como éste salió */
+    last_entered_at_cruise = exit_at_cruise;
     g_pending.valid = false;
 }
 
@@ -697,10 +707,6 @@ static void process_gcode_line(char *raw_line)
     	 * primero tengo que ejecutar lo que haya quedado pendiente del
     	 * encadenado de segmentos. sino ese ultimo tramo se perderia o
     	 * se mezclaria mal con esta linea nueva */
-    	if (cmd.type == GCODE_G0 || cmd.has_z || cmd.has_m5 || cmd.has_m84) {
-    	    flush_pending_move(false);
-    	}
-
         if (cmd.has_g90) g_absolute_mode = 1;
         if (cmd.has_g91) g_absolute_mode = 0;
         if (cmd.has_m3 || cmd.has_m4) {
@@ -714,9 +720,6 @@ static void process_gcode_line(char *raw_line)
         }
         if (cmd.has_m5) {
             laser_disable();
-        }
-        if (cmd.has_s) {
-            laser_set_power(cmd.s);
         }
         uint8_t explicit_motion = (cmd.type == GCODE_G0 || cmd.type == GCODE_G1);
         if (explicit_motion) g_last_motion = cmd.type;
@@ -816,6 +819,9 @@ static void process_gcode_line(char *raw_line)
                 g_pending.feed = feed;
                 g_pending.dir_x = new_dir_x;
                 g_pending.dir_y = new_dir_y;
+                g_pending.is_rapid = (cmd.type == GCODE_G0);
+                g_pending.has_laser_s = cmd.has_s;
+                g_pending.laser_s = cmd.s;
                 g_last_line_tick = HAL_GetTick();
             }
         }
