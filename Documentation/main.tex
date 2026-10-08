@@ -1,0 +1,224 @@
+\documentclass[blue,fullpaper]{ludusofficial}  % Theme: blue, red, green, purple, orange, cyan
+                                              % Article type: fullpaper, letter, poster, survey, shortpaper, artpaper
+
+%% Packages
+\usepackage{amsmath}
+\usepackage{tabularx}
+\usepackage{graphicx} % Ecuaciones muy largas
+
+%% Document metadata
+\journalname{}
+\journalsubtitle{}
+\conferencename{}
+\publicationyear{2026}
+\institution{}  % This is now set by default in the class file
+\journalurl{}  % This is now set by default in the class file
+% \articletype{FULL PAPER}  % Set by document class option, or use \articletype{} to customize
+%% DOI (optional - leave empty if not assigned yet)
+% \articledoi{10.1234/ludus.2026.example}
+
+%% Article information
+\title{Diseño e implementación de una CNC Laser controlada por un microcontrolador STM32 Nucleo}
+\shorttitle{CNC Laser}  % Short title for page headers
+\shortauthor{N.P. \& F.B.R.}  % Short author names for page headers (Separar autores con \&)
+
+\author{%
+    \textbf{Nicolas Patricelli}\textsuperscript{1}\\
+    [0.2cm]
+    \textbf{Federico Barrios Retta}\textsuperscript{2}\\
+    [0.2cm]
+    \mdseries\small\textsuperscript{1}Facultad de Ingenieria, Universidad Nacional de Cuyo, Argentina\\
+    \mdseries\small\textsuperscript{2}Facultad de Ingenieria, Universidad Nacional de Cuyo, Argentina
+    % \small Corresponding: john.smith@university.edu
+}
+
+\begin{document}
+
+
+%% Abstract and keywords must be defined BEFORE \maketitle
+\begin{abstract}
+
+Abstract
+
+\end{abstract}
+
+
+%% Maketitle creates full-width header with abstract and keywords, then starts two-column layout
+\maketitle
+
+\onecolumn
+\tableofcontents
+\clearpage
+\twocolumn
+
+\newpage
+
+\section{Introducción y objetivos}
+
+El grabado mediante láser requiere que el desplazamiento
+relativo entre la herramienta y la pieza sea coordinado
+con el accionamiento del láser. Para ejecutar una trayectoria
+definida, deben ser interpretadas las instrucciones de
+trabajo y generadas las señales que gobiernan los actuadores
+de la máquina.
+
+En el marco de la asignatura \textit{Microcontroladores
+y Electrónica de Potencia}, se desarrolló una máquina
+de control numérico computarizado (CNC) destinada al
+grabado mediante láser. El proyecto permite integrar
+los contenidos relacionados con la programación de
+sistemas embebidos, la comunicación serie, la utilización
+de sensores y el accionamiento de motores paso a paso.
+
+\subsection{Objetivo general}
+
+Diseñar e implementar un sistema de control basado en
+un microcontrolador para ejecutar trayectorias de grabado
+mediante láser a partir de instrucciones enviadas desde
+una computadora.
+
+\subsection{Objetivos específicos}
+
+Se plantean como objetivos específicos la interpretación
+de las instrucciones de trabajo, la coordinación de los
+desplazamientos en el plano de grabado, el ajuste de la
+distancia relativa entre el láser y la pieza, y la regulación
+del accionamiento del láser durante la ejecución de las
+trayectorias.
+
+Asimismo, se busca establecer una referencia de posición
+mediante sensores de fin de carrera y verificar el
+funcionamiento del sistema mediante ensayos de movimiento
+y grabado.
+
+
+
+% ============================================================================= %
+\section{Descripción General del Sistema}
+
+El proyecto consiste en el diseño y la implementación de una máquina de control numérico computarizado (CNC) para grabado mediante láser. El sistema tendrá como objetivo cumplir los siguientes requisitos:
+
+\begin{itemize}
+    \item \textbf{Posicionamiento en el plano X--Y.}
+    Se busca realizar desplazamientos dentro de un área
+    útil de [completar]~cm $\times$ [completar]~cm.
+    Mediante la cinemática CoreXY y la coordinación de
+    los motores paso a paso, se permite ejecutar
+    movimientos sobre cada eje cartesiano y trayectorias
+    con desplazamientos simultáneos en X e Y.
+
+    \item \textbf{Ajuste mediante el eje Z.}
+    Se incorpora un eje Z para ajustar la posición
+    relativa entre el módulo láser y la pieza,
+    permitiendo adecuar la distancia de enfoque a piezas
+    de distintas alturas. Su accionamiento se realiza
+    de forma independiente del movimiento en el plano
+    X--Y; no se contempla la interpolación simultánea
+    de los tres ejes durante el grabado.
+
+    \item \textbf{Interpretación de instrucciones G-code.}
+    Las instrucciones recibidas desde la computadora
+    son interpretadas por el firmware del microcontrolador.
+    Se implementa el subconjunto de comandos necesario
+    para controlar los desplazamientos y el accionamiento
+    del láser. Para la generación del archivo G-code
+    se utiliza el software [completar].
+
+    \item \textbf{Regulación del accionamiento del láser.}
+    Se utiliza una señal de modulación por ancho de pulso
+    (PWM) para comandar el módulo láser. Mediante la
+    variación del ciclo de trabajo, se busca regular
+    la potencia aplicada durante el proceso de grabado.
+\end{itemize}
+
+
+
+% ============================================================================= %
+\section{Sistema Mecánico y Actuadores}
+
+\subsection{Armadura de la CNC}
+
+La CNC fue diseñada como una jaula de dimensiones [completar] cm $\times$ [completar] cm $\times$ [completar] cm de volumen, realizadas con perfiles cuadrados de área de 10 cm $\times$ 10 cm de aluminio, para evitir corroción excesiva y oxidación por uso en la interperie.
+
+% [Imagen las barras solas] Caption: Materiales
+
+% [Imagen la armadura armada] Caption: Armadura Ensamblada de la CNC
+
+\subsection{Motores PaP}
+
+La elección de los motores para la CNC fue conservativa: se utilizarán motores Paso a Paso (a.k.a. \textit{Steppers Motors}). La decisión es tanto por practicidad como por convención: a baja escala, y cuando la necesidad de precisión no es exageradamente alta, el control de motores PaP es relativamente más sencilla que el control de motores servocontrolados. 
+
+Los motores PaP particulares que se elegieron fueron los Nema 17
+
+% ============================================================================= %
+\section{Hardware e Interfaces Eléctricas}
+
+\subsection{Microcontrolador Seleccionado}
+
+El corazón del proyecto, el sistema de control de la CNC será placa de desarrollo NUCLEO-F446RE que cuenta con MCU (i.e. \textit{Microcontroller Unit}) STM32F4, también identificable como un Cortex-M4F. Dicha placa de desarrolla cuenta con los siguientes componentes:
+
+\begin{itemize}
+    \item STM32F446RET6 in LQFP64 package
+    \item ARM® 32-bit Cortex®-M4 CPU with FPU
+    \item Adaptive real-time accelerator (ART Accelerator)
+    \item 180 MHz max CPU frequency
+\item VDD from 1.7 V to 3.6 V
+\item 512 KB Flash
+\item 128 KB SRAM
+\item 10 General purpose timers
+\item 2 Advanced control timers
+\item 2 basic timers
+\item SPI(4)
+\item I2C(3)
+\item USART(4)
+\item UART(2)
+\item USB OTG Full Speed and High Speed
+\item CAN(2)
+\item SAI(2)
+\item SPDIF Rx(1)
+\item HDMI CEC(1)
+\item Quad SPI(1)
+\item Camera Interface
+\item GPIO(50) with external interrupt capability
+\item 12-bit ADC(3) with 16 channels
+\item 12-bit DAC with 2 channels
+
+\end{itemize}
+
+Si bien es posible realizarse mediante software, la placa de desarrollo cuenta con muchas herramientas muy útiles para el proyecto, como lo serían la FPU para el cálculo de punto flotante de coordendas y velocidades, la frecuencia de 180 MHz del CPU, gran cantidad de timers a disposición, comunicación mediante protocolo I2C integrada, comunicación mediante protocolo UART integrado, gran cantidad de pines GPIO con capacidad de interrupciones, ADC y DAC de 12 bits.
+
+\subsection{Drivers Seleccionados}
+
+Para
+
+% ============================================================================= %
+\section{Arquitectura del Firmware}
+
+% ============================================================================= %
+\section{Comunicación e Interpretación de G-Code}
+
+% ============================================================================= %
+\section{Generación y Coordinación del Movimiento}
+
+% ============================================================================= %
+\section{Referenciación, Límites y Control del Láser}
+
+% ============================================================================= %
+\section{Ensayos y Resultados}
+
+% ============================================================================= %
+\section{Limitaciones y Conclusiones}
+
+% ============================================================================= %
+
+\begin{acknowledgments}
+This research was supported by the Game Studies Research Initiative. We thank the anonymous reviewers for their valuable feedback and suggestions.
+\end{acknowledgments}
+
+%% References using BibTeX
+%% Make sure to compile with: pdflatex -> bibtex -> pdflatex -> pdflatex
+\bibliographystyle{plain}
+\bibliography{references}
+
+
+\end{document}
