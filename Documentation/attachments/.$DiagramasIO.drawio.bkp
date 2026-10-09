@@ -282,6 +282,9 @@
             <mxGeometry as="geometry" />
           </mxCell>
         </UserObject>
+        <mxCell id="WcR50oJFRj0sFrtiRiBn-4" parent="g0cmuphIkwDh-FzCKn02-1" style="rounded=0;whiteSpace=wrap;html=1;" value="" vertex="1">
+          <mxGeometry height="1145.61" width="1619.61" x="-809.61" y="-1155.61" as="geometry" />
+        </mxCell>
         <UserObject label="Inicialización" mermaidId="n:I" mermaidBaseStyle="rounded=1;absoluteArcSize=1;arcSize=10;html=1;whiteSpace=wrap;strokeWidth=2;fillColor=#ffffff;strokeColor=#28253D;fontColor=#28253D;fontFamily=Recursive;fontSize=14;shadow=1;shadowColor=#000000;shadowOffsetX=4;shadowOffsetY=4;shadowBlur=0;shadowOpacity=6;" mermaidBaseValue="Inicialización" id="g0cmuphIkwDh-FzCKn02-2">
           <mxCell parent="g0cmuphIkwDh-FzCKn02-1" style="rounded=1;absoluteArcSize=1;arcSize=10;html=1;whiteSpace=wrap;strokeWidth=2;fillColor=#ffffff;strokeColor=#28253D;fontColor=#28253D;fontFamily=Recursive;fontSize=14;shadow=1;shadowColor=#000000;shadowOffsetX=4;shadowOffsetY=4;shadowBlur=0;shadowOpacity=6;fontSource=https%3A%2F%2Ffonts.googleapis.com%2Fcss%3Ffamily%3DRecursive;" vertex="1">
             <mxGeometry height="37" width="136" x="398" y="-1066" as="geometry" />
