@@ -4,13 +4,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* tipo de movimiento que trae la linea. el resto de las cosas (x, y, z,
- * s, m-codigos) son banderas aparte porque en una sola linea de gcode
- * pueden venir varias cosas mezcladas, tipo "g1 x10 y5 s200" */
 typedef enum {
     GCODE_NONE = 0,
-    GCODE_G0,   /* movimiento rapido, sin laser */
-    GCODE_G1    /* movimiento a la velocidad de trabajo (f) */
+    GCODE_G0,   /* movimiento rápido */
+    GCODE_G1    /* movimiento lineal a velocidad de trabajo */
 } GcodeCommandType;
 
 typedef struct {
@@ -18,25 +15,29 @@ typedef struct {
     bool has_x;
     bool has_y;
     bool has_f;
-    bool has_s;     /* potencia del laser (0..s_max) */
+    bool has_s;     /* potencia del láser (0..S_MAX) */
     bool has_z;
-    bool has_g90;   /* la linea trae g90 (modo absoluto) */
-    bool has_g91;   /* la linea trae g91 (modo relativo) */
-    bool has_m3;    /* laser on, potencia constante */
-    bool has_m4;    /* laser on, potencia dinamica (por ahora lo trato igual que m3) */
-    bool has_m5;    /* laser off */
-    bool has_m84;   /* desactivar motores (para poder mover la maquina a mano) */
-    bool has_m17;   /* reactivar motores */
-    float x;    /* mm, tal cual viene en la linea (absoluto o relativo segun el modo activo) */
+    bool has_g90;   /* la línea contiene G90 (modo absoluto) */
+    bool has_g91;   /* la línea contiene G91 (modo relativo) */
+    bool has_m3;    /* láser ON, potencia constante */
+    bool has_m4;    /* láser ON, potencia dinámica (por ahora se trata igual que M3) */
+    bool has_m5;    /* láser OFF */
+    bool has_m84;   /* desactivar motores (liberar para mover a mano) */
+    bool has_m17;   /* reactivar motores explícitamente */
+    bool has_g92;   /* G92: fija el origen de trabajo (offset) */
+    bool has_g92_1; /* G92.1: borra el offset de trabajo */
+    bool has_unknown; /* la linea trae algo que el firmware no reconoce */
+    float x;    /* mm, valor tal cual viene en la línea (absoluto o relativo según modo) */
     float y;    /* mm */
     float z;    /* mm */
-    float f;    /* mm/min, como pide el estandar de gcode */
-    float s;    /* potencia del laser, 0..s_max */
+    float f;    /* mm/min, como define el estándar G-code */
+    float s;    /* potencia del láser, 0..S_MAX */
 } GcodeCommand;
 
-/* parsea una linea de gcode (ya sin \r\n, terminada en \0).
- * devuelve true si encontro algun comando valido.
- * ignora comentarios entre parentesis y lineas que arrancan con ; */
+/* Parsea una línea de G-code (ya sin '\r\n', terminada en '\0').
+ * Devuelve true si se reconoció un comando G0/G1 válido.
+ * Ignora comentarios entre paréntesis y líneas que empiecen con ';'.
+ */
 bool gcode_parse_line(const char *line, GcodeCommand *out_cmd);
 
 #endif /* GCODE_PARSER_H */

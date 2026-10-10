@@ -2,6 +2,7 @@
 #include "corexy_config.h"
 #include <math.h>
 #include <stdlib.h>
+#include "laser.h"
 
 /* ===================== Estado interno ===================== */
 
@@ -11,6 +12,16 @@ static TIM_HandleTypeDef *s_timer;
  * posicion fisica real hasta que no se hace homing una vez */
 static volatile float s_pos_x_mm = 0.0f;
 static volatile float s_pos_y_mm = 0.0f;
+
+/* funcion que se llama (desde el main, nunca desde una isr) mientras
+ * stepper_move_to espera que termine el movimiento. la usa el main para
+ * seguir contestando el '?' y los avisos durante movimientos largos */
+static void (*s_wait_cb)(void) = 0;
+
+void stepper_set_wait_callback(void (*cb)(void))
+{
+    s_wait_cb = cb;
+}
 
 /* toda la info de un movimiento en curso. la hice volatile porque se
  * lee y escribe tanto desde el main (cuando arranca un movimiento nuevo)
@@ -173,6 +184,7 @@ void stepper_move_to(float x_mm, float y_mm, float feed_mm_min,
     float k = (float)s_move.steps_major_total / (dist_mm * STEPS_PER_MM);
 
     float feed_mm_s = (feed_mm_min > 0.0f) ? (feed_mm_min / 60.0f) : DEFAULT_FEED_MM_S;
+    if (feed_mm_s > MAX_FEED_MM_MIN / 60.0f) feed_mm_s = MAX_FEED_MM_MIN / 60.0f; /* tope de velocidad */
     s_move.cruise_speed_steps_s = feed_mm_s * STEPS_PER_MM * k;
 
     /* si enter_at_cruise es true, no hace falta rampa de entrada porque
@@ -225,12 +237,19 @@ void stepper_move_to(float x_mm, float y_mm, float feed_mm_min,
         v0 = s_move.cruise_speed_steps_s;
     }
     if (v0 < 1.0f) v0 = 1.0f;
+    /* para m4: el laser arranca con la potencia que le toca a la
+     * velocidad del primer paso (en m3 esto no hace nada) */
+    laser_set_speed_ratio(v0 / s_move.cruise_speed_steps_s);
     schedule_next_step(1000000.0f / v0);
 
     /* esto es bloqueante a proposito: me quedo esperando a que la isr
      * del timer termine el movimiento. mientras tanto, el uart sigue
      * funcionando por interrupcion asi que no se pierden bytes */
     while (s_move.move_active) {
+        /* solo contesto si falta bastante para terminar el tramo: una
+         * transmision dura ~3.5 ms y si el tramo termina en el medio
+         * se nota un tiron entre segmentos encadenados */
+        if (s_wait_cb) s_wait_cb();
         __WFI();
     }
 }
@@ -266,6 +285,11 @@ void stepper_timer_isr(void)
 
     if (s_move.steps_done >= s_move.steps_major_total) {
         s_move.move_active = false;
+        /* si este movimiento freno, la maquina queda parada: en m4 el
+         * laser tiene que quedar en 0 */
+        if (s_move.decel_start_step < s_move.steps_major_total) {
+            laser_set_speed_ratio(0.0f);
+        }
         return;
     }
 
@@ -284,5 +308,7 @@ void stepper_timer_isr(void)
     }
 
     if (v < 1.0f) v = 1.0f; /* para no dividir por cero mas abajo */
+    /* m4: potencia proporcional a la velocidad actual / velocidad de crucero */
+    laser_set_speed_ratio(v / s_move.cruise_speed_steps_s);
     schedule_next_step(1000000.0f / v);
 }

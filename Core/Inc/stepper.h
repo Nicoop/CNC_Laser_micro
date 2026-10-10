@@ -4,6 +4,13 @@
 #include "stm32f4xx_hal.h"
 #include <stdbool.h>
 
+/* velocidad maxima permitida de la maquina en mm/min. si el gcode pide
+ * una F mas alta, main.c entra en alarma (igual que un final de carrera)
+ * y stepper.c la recorta como seguro extra */
+#ifndef MAX_FEED_MM_MIN
+#define MAX_FEED_MM_MIN 3000.0f
+#endif
+
 /* este modulo maneja los motores de x e y (motor a y motor b del corexy).
  * llamar una vez en main(), despues de MX_GPIO_Init() y de crear el
  * timer que se va a usar para generar los pulsos de step */
@@ -46,5 +53,12 @@ void stepper_timer_isr(void);
  * actualiza la posicion logica porque no se sabe bien en que paso
  * exacto quedo cuando se corto */
 void stepper_emergency_stop(void);
+
+/* registra una funcion que stepper_move_to llama una y otra vez mientras
+ * espera que termine el movimiento (desde el main, no desde una isr). el
+ * main la usa para seguir contestando el '?' y los avisos durante un
+ * movimiento largo, asi laser grbl no cree que la placa se colgo. si no
+ * se registra nada, simplemente espera sin hacer nada mas */
+void stepper_set_wait_callback(void (*cb)(void));
 
 #endif /* STEPPER_H */

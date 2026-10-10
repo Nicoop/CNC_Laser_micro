@@ -2,6 +2,7 @@
 #include "corexy_config.h"
 #include "z_axis.h"
 #include "stepper.h"
+#include "watchdog.h"
 
 /* velocidades de busqueda, en periodo entre pasos (microsegundos).
  * cuanto mas chico el numero, mas rapido. los fui ajustando a prueba y
@@ -58,6 +59,7 @@ static inline void delay_us(uint32_t us)
 {
     uint32_t start = DWT->CYCCNT;
     uint32_t cycles = us * (SystemCoreClock / 1000000U);
+    watchdog_refresh(); /* el homing es bloqueante: sigo pateando al watchdog */
     while ((DWT->CYCCNT - start) < cycles) { }
 }
 
