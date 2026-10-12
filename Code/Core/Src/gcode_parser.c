@@ -3,18 +3,13 @@
 #include <string.h>
 #include <ctype.h>
 
-/* nota sobre el modo absoluto/relativo (g90/g91): laser grbl por defecto
- * manda en absoluto. si en algun momento agrego g91 de verdad hay que
- * manejarlo donde se usa este parser (main.c), ac solo se detecta que
- * vino la g90/g91 en la linea, no se hace nada con eso */
-
-/* ojo con esto: strtof de la libreria estandar interpreta "0x10" como
- * numero hexadecimal (0x10 = 16 decimal). esto rompe todo cuando llega
- * un gcode sin espacios tipo "g0x10", porque el "0" de la g0 queda
- * pegado a la x y strtof se come las dos cosas como si fueran un numero
- * hexa. me paso en serio y tarde bastante en encontrarlo. por eso hice
- * mi propio parser de numeros que solo entiende decimales normales y
- * nunca mastica la letra x como si fuera parte del numero */
+/* strtof() interpreta un prefijo "0x"/"0X" como notación hexadecimal
+ * (ej. "0X10" -> 16.0), lo cual es un desastre para G-code sin espacios
+ * como "G0X10" (el '0' de G0 pegado a la X). Esta versión propia SOLO
+ * entiende números decimales normales: signo opcional, dígitos, punto
+ * decimal opcional, dígitos. Nunca interpreta 'x'/'X' como parte del
+ * número, así que corta ahí y deja la letra siguiente para el llamador.
+ */
 static float parse_gcode_number(const char *str, char **end)
 {
     const char *p = str;
@@ -46,7 +41,7 @@ static float parse_gcode_number(const char *str, char **end)
     }
 
     if (!saw_digit) {
-        /* no habia ningun digito real, asi que no es un numero valido */
+        /* no había ningún dígito real: número inválido */
         *end = (char *)str;
         return 0.0f;
     }
@@ -55,6 +50,10 @@ static float parse_gcode_number(const char *str, char **end)
     return value * sign;
 }
 
+/* Estado interno: LaserGRBL por defecto envía coordenadas absolutas (G90).
+ * Si más adelante agregás G91 (relativo), este módulo es el lugar para manejarlo.
+ */
+
 bool gcode_parse_line(const char *line, GcodeCommand *out_cmd)
 {
     if (line == NULL || out_cmd == NULL) return false;
@@ -62,31 +61,28 @@ bool gcode_parse_line(const char *line, GcodeCommand *out_cmd)
     memset(out_cmd, 0, sizeof(GcodeCommand));
     out_cmd->type = GCODE_NONE;
 
-    /* salteo espacios por si vienen al principio de la linea */
+    /* Saltar espacios iniciales */
     while (*line == ' ' || *line == '\t') line++;
 
-    /* lineas vacias o comentarios las ignoro directamente */
+    /* Ignorar líneas vacías o comentarios */
     if (*line == '\0' || *line == ';' || *line == '(') {
         return false;
     }
 
     bool found_command = false;
 
-    /* recorro la linea letra por letra. cada letra (g, x, y, z, f, s, m)
-     * viene seguida de un numero, y los voy guardando en la estructura
-     * de salida segun corresponda */
     while (*line != '\0') {
         char letter = toupper((unsigned char)*line);
 
         if (letter == '(') {
-            /* comentario entre parentesis, lo salto entero */
+            /* saltar comentario entre paréntesis */
             while (*line != '\0' && *line != ')') line++;
             if (*line == ')') line++;
             continue;
         }
 
         if (letter == ';') {
-            break; /* todo lo que sigue en la linea es comentario */
+            break; /* resto de la línea es comentario */
         }
 
         if (isalpha((unsigned char)letter)) {
@@ -95,14 +91,20 @@ bool gcode_parse_line(const char *line, GcodeCommand *out_cmd)
             float value = parse_gcode_number(line, &end);
 
             if (end == line) {
-                /* la letra no tenia un numero valido atras, la salteo */
+                /* letra sin número válido detrás, la salteamos */
                 continue;
             }
 
             switch (letter) {
                 case 'G': {
                     int gcode_num = (int)value;
-                    if (gcode_num == 0) {
+                    if (value > 91.99f && value < 92.05f) {
+                        out_cmd->has_g92 = true;
+                        found_command = true;
+                    } else if (value > 92.05f && value < 92.15f) {
+                        out_cmd->has_g92_1 = true;
+                        found_command = true;
+                    } else if (gcode_num == 0) {
                         out_cmd->type = GCODE_G0;
                         found_command = true;
                     } else if (gcode_num == 1) {
@@ -114,8 +116,9 @@ bool gcode_parse_line(const char *line, GcodeCommand *out_cmd)
                     } else if (gcode_num == 91) {
                         out_cmd->has_g91 = true;
                         found_command = true;
+                    } else {
+                        out_cmd->has_unknown = true;
                     }
-                    /* otros codigos g (g21, etc) los ignoro por ahora */
                     break;
                 }
                 case 'X':
@@ -155,12 +158,13 @@ bool gcode_parse_line(const char *line, GcodeCommand *out_cmd)
                     } else if (mcode_num == 17) {
                         out_cmd->has_m17 = true;
                         found_command = true;
+                    } else {
+                        out_cmd->has_unknown = true;
                     }
-                    /* otros codigos m los ignoro por ahora */
                     break;
                 }
                 default:
-                    /* letras que no uso todavia, las ignoro sin drama */
+                    out_cmd->has_unknown = true; /* letra que no maneja el firmware */
                     break;
             }
 
@@ -170,15 +174,11 @@ bool gcode_parse_line(const char *line, GcodeCommand *out_cmd)
         }
     }
 
-    /* esto es para el gcode modal: laser grbl a veces manda una linea
-     * solo con "x17.333 s894" sin repetir el g1, porque en el estandar
-     * de gcode eso significa "segui haciendo lo mismo que la linea
-     * anterior". si no hago esto, esas lineas se ignoraban solas y el
-     * raster se frenaba a la mitad sin razon aparente (me costo un rato
-     * largo darme cuenta de esto) */
+    /* G-code modal: una línea con X/Y/F pero sin G explícito sigue siendo
+     * un comando válido (continúa el último tipo de movimiento). */
     if (!found_command && (out_cmd->has_x || out_cmd->has_y || out_cmd->has_z || out_cmd->has_f || out_cmd->has_s)) {
         found_command = true;
     }
 
-    return found_command;
+    return found_command || out_cmd->has_unknown;
 }

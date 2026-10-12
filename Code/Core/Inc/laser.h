@@ -4,34 +4,40 @@
 #include "stm32f4xx_hal.h"
 #include <stdbool.h>
 
-/* potencia maxima que acepta el gcode en el campo s. laser grbl por
- * defecto asume 1000 en configuraciones modernas, si la version que
- * usan es mas vieja puede ser 0-255, en ese caso cambiar este numero */
+/* potencia maxima que acepta el gcode en el campo s. tiene que coincidir
+ * con lo que se le informa a laser grbl en $30 (ver el $$ de main.c) */
 #define LASER_S_MAX   1000.0f
 
 /* llamar una vez en main(), despues de MX_TIM3_Init() */
 void laser_init(TIM_HandleTypeDef *pwm_timer, uint32_t pwm_channel);
 
-/* habilita el laser (esto responde a m3/m4). ojo que esto solo
- * "destraba" el sistema, no prende nada por si solo: la potencia real
- * la pone laser_set_power(). si nunca se llama a esto, cualquier s que
- * llegue se ignora */
+/* habilita el laser (m3/m4). solo "destraba": la salida la define la
+ * potencia programada (s) y, en m4, la velocidad del cabezal */
 void laser_enable(void);
 
-/* apaga el laser (m5) y lleva el duty a 0 de una, sin esperar nada */
+/* apaga el laser (m5): salida a 0 y borra la potencia programada, asi
+ * despues de un m5 hace falta mandar un s nuevo para volver a quemar
+ * (mas conservador que un grbl real, que se acuerda del ultimo s) */
 void laser_disable(void);
 
-/* fija la potencia entre 0 y LASER_S_MAX. si el laser esta deshabilitado
- * (porque se llamo a laser_disable antes) esto no hace nada hasta el
- * proximo laser_enable() */
+/* false = m3, potencia constante. true = m4, potencia dinamica: la
+ * salida se escala con la velocidad actual / velocidad de crucero */
+void laser_set_dynamic(bool dynamic);
+
+/* fija la potencia programada (s suelto, sin movimiento) */
 void laser_set_power(float s_value);
 
-/* apaga la salida DE UNA, sin tocar el estado de habilitado ni la
- * potencia que tenia guardada. la uso antes de cada movimiento rapido
- * (g0): en un grbl real, en modo laser, se apaga el laser en todo g0
- * pase lo que pase con el s de esa linea, por seguridad. despues de
- * esto, el proximo s que llegue vuelve a aplicar normal si el laser
- * sigue habilitado */
+/* se llama justo antes de ejecutar cada segmento de movimiento.
+ * rapid = es un g0 (la salida va a 0 mientras dure).
+ * has_s / s_value = la linea traia un s nuevo (el s es modal, si no
+ * viene se sigue usando el ultimo) */
+void laser_begin_segment(bool rapid, bool has_s, float s_value);
+
+/* velocidad actual / velocidad de crucero (0..1). la llama la isr del
+ * stepper en cada paso. en m3 no hace nada con el hardware */
+void laser_set_speed_ratio(float ratio);
+
+/* se deja por compatibilidad: equivale a laser_begin_segment(true,false,0) */
 void laser_force_off_for_rapid(void);
 
 #endif /* LASER_H */

@@ -28,6 +28,7 @@
 #include "corexy_config.h"
 #include "homing.h"
 #include "motor_enable.h"
+#include "watchdog.h"
 #include "z_axis.h"
 #include "laser.h"
 #include "gcode_parser.h"
@@ -53,6 +54,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+IWDG_HandleTypeDef hiwdg;
+
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
@@ -61,6 +64,27 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 
+/* ===== mensajes hacia laser grbl =====
+ * laser grbl solo muestra lineas en formato grbl: "ALARM:n", "error:n" y
+ * "[MSG:texto]". cualquier otro texto lo ignora (se ve en blanco).
+ * regla: una linea de gcode recibe UNA sola respuesta, "ok" o "error:n".
+ * por eso los avisos que no cortan el flujo van como [MSG:...] y despues
+ * sale el "ok" normal, asi no se desincroniza el conteo de laser grbl.
+ * todos los textos estan juntos aca para cambiarlos facil. */
+#define MSG_WELCOME          "\r\nGrbl 1.1h ['$' for help]\r\n"
+#define MSG_OK               "ok\r\n"
+#define MSG_ALARM_LIMIT_FMT  "ALARM:1\r\n[MSG:Final de carrera %c]\r\n[MSG:Motores libres. $X y M17]\r\n"
+#define MSG_WARN_FEED_FMT    "[MSG:F%d supera max. Uso F%d]\r\n"
+#define MSG_ALARM_WATCHDOG   "ALARM:3\r\n[MSG:Reinicio por watchdog]\r\n[MSG:Posicion perdida. $X y $H]\r\n"
+#define MSG_ALARM_HOMING     "ALARM:9\r\n[MSG:Homing fallo]\r\n"
+#define MSG_ERR_UNKNOWN      "error:20\r\n[MSG:Comando no reconocido]\r\n"
+#define MSG_ERR_UNKNOWN_SYS  "error:3\r\n[MSG:Comando $ no reconocido]\r\n"
+#define MSG_ERR_LOCKED       "error:9\r\n[MSG:En alarma. Mande $X]\r\n"
+#define MSG_WARN_MOTORS_OFF  "[MSG:Motores off. Mande M17]\r\n"
+#define MSG_WARN_OUT_XY      "[MSG:Fuera de area XY]\r\n"
+#define MSG_WARN_OUT_Z       "[MSG:Fuera de area Z]\r\n"
+
+
 /* bandera de alarma: se activa cuando un final de carrera se dispara
  * de improviso en medio de un movimiento normal (no durante el homing
  * a proposito). mientras esta activa, el firmware rechaza cualquier
@@ -68,11 +92,20 @@ UART_HandleTypeDef huart2;
  * la maquina choco contra algo, no siga como si nada mientras laser
  * grbl le sigue mandando lineas del trabajo */
 static volatile bool alarm_active = false;
+
+/* offset de trabajo (G92). posicion de trabajo = posicion de maquina -
+ * offset. la posicion de maquina (la del homing, 0..240 / 0..200) nunca
+ * se toca, asi siempre se conserva la referencia fisica y los limites
+ * del area se controlan contra la maquina real */
+static float g_off_x = 0.0f;
+static float g_off_y = 0.0f;
 /* esta otra bandera es para que el mensaje de alarma se mande una sola
  * vez (desde el main, nunca desde la interrupcion) aunque el switch
  * rebote mecanicamente y dispare la interrupcion varias veces por una
  * sola pulsada real */
 static volatile bool alarm_message_pending = false;
+/* cual final de carrera disparo la alarma: 'X', 'Y' o 'Z' (lo carga la isr, lo imprime el main) */
+static volatile char alarm_limit_axis = '?';
 
 /* esto es el "look ahead" simplificado: en vez de ejecutar cada linea
  * de gcode apenas llega, guardo el movimiento pendiente y espero a ver
@@ -132,10 +165,13 @@ static void MX_USART2_UART_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
+static void MX_IWDG_Init(void);
 /* USER CODE BEGIN PFP */
 static void flush_pending_move(bool exit_at_cruise);
 static void send_status_report(UART_HandleTypeDef *huart);
 static void process_gcode_line(char *raw_line);
+static void service_realtime(void);
+static void uart_tx(UART_HandleTypeDef *h, uint8_t *p, uint16_t n, uint32_t to);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -160,6 +196,8 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+  /* con el debugger frenado en un breakpoint, congelo el watchdog para que no reinicie la placa */
+  __HAL_DBGMCU_FREEZE_IWDG();
 
   /* USER CODE END Init */
 
@@ -176,6 +214,7 @@ int main(void)
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM4_Init();
+  MX_IWDG_Init();
   /* USER CODE BEGIN 2 */
 
   /* inicializo todos mis modulos. el orden ac no importa mucho entre
@@ -191,33 +230,35 @@ int main(void)
   /* mando el mensaje de bienvenida tipo grbl apenas arranca, para el
    * caso de que algun programa ya este escuchando el puerto desde antes
    * de que yo conecte el cable */
-  const char *welcome = "\r\nGrbl 1.1h ['$' for help]\r\n";
-  HAL_UART_Transmit(&huart2, (uint8_t*)welcome, strlen(welcome), 100);
+  /* watchdog: lo configura y arranca cubemx (MX_IWDG_Init). aca solo miro
+   * si el reinicio anterior fue por watchdog. si el firmware se cuelga mas
+   * de ~2 s sin llamar a watchdog_refresh(), la placa se reinicia sola */
+  bool reset_por_watchdog = watchdog_caused_last_reset();
+
+  const char *welcome = MSG_WELCOME;
+  uart_tx(&huart2, (uint8_t*)welcome, strlen(welcome), 100);
+  if (reset_por_watchdog) {
+      /* se perdio la posicion: dejo la maquina bloqueada hasta $X y $H */
+      alarm_active = true;
+      uart_tx(&huart2, (uint8_t*)MSG_ALARM_WATCHDOG, strlen(MSG_ALARM_WATCHDOG), 100);
+  }
   stepper_init(&htim2); /* esto quedo duplicado de una version anterior, no hace falta pero tampoco molesta */
   HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
+
+  /* le digo al stepper que, mientras espera a que termine un movimiento
+   * largo, llame a service_realtime(). asi se siguen contestando el '?'
+   * y los avisos y laser grbl no cree que la placa se colgo. va despues
+   * de los stepper_init por si alguno de ellos reinicia el estado */
+  stepper_set_wait_callback(service_realtime);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  /* reviso las banderas de mensajes pendientes ANTES que nada mas,
-	   * asi salen apenas se puede, no dependen de que termine de
-	   * procesar otra cosa primero */
-	  if (alarm_message_pending) {
-	      alarm_message_pending = false;
-	      const char *alarm = "ALARM: Final de carrera activado durante el movimiento\r\n";
-	      HAL_UART_Transmit(&huart2, (uint8_t*)alarm, strlen(alarm), 100);
-	  }
-	  if (welcome_pending) {
-	      welcome_pending = 0;
-	      const char *welcome = "\r\nGrbl 1.1h ['$' for help]\r\n";
-	      HAL_UART_Transmit(&huart2, (uint8_t*)welcome, strlen(welcome), 100);
-	  }
-      if (status_report_pending) {
-          status_report_pending = 0;
-          send_status_report(&huart2);
-      }
+	  /* atiendo los mensajes pendientes (alarma, bienvenida, estado)
+	   * ANTES que nada mas, asi salen apenas se puede */
+	  service_realtime();
 
       /* si quedo un movimiento pendiente esperando a ver si la proxima
        * linea continua en la misma direccion, y paso demasiado tiempo
@@ -240,15 +281,7 @@ int main(void)
                   line_buf[line_idx] = '\0';
                   process_gcode_line(line_buf);
                   line_idx = 0;
-
-                  /* Chequeamos el '?' pendiente DESPUÉS de cada línea,
-                   * no solo una vez por vuelta del while externo, porque
-                   * este bucle interno puede seguir de largo procesando
-                   * muchas líneas sin volver arriba mientras dura un trabajo. */
-                  if (status_report_pending) {
-                      status_report_pending = 0;
-                      send_status_report(&huart2);
-                  }
+                  service_realtime();
               }
           } else if (line_idx < GCODE_LINE_BUF_SIZE - 1) {
               line_buf[line_idx++] = (char)b;
@@ -421,6 +454,34 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 2 */
   HAL_TIM_MspPostInit(&htim3);
+
+}
+
+/**
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
+{
+
+  /* USER CODE BEGIN IWDG_Init 0 */
+
+  /* USER CODE END IWDG_Init 0 */
+
+  /* USER CODE BEGIN IWDG_Init 1 */
+
+  /* USER CODE END IWDG_Init 1 */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_64;
+  hiwdg.Init.Reload = 1000;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG_Init 2 */
+
+  /* USER CODE END IWDG_Init 2 */
 
 }
 
@@ -605,11 +666,60 @@ static void send_status_report(UART_HandleTypeDef *huart)
 {
     float x, y;
     stepper_get_position(&x, &y);
-    char xs[16], ys[16], msg[64];
+    char xs[16], ys[16], wxs[16], wys[16];
+    static char msg[100]; /* static: el tx por interrupcion sigue usando el buffer despues de salir */
     format_float3(x, xs, sizeof(xs));
     format_float3(y, ys, sizeof(ys));
-    int len = snprintf(msg, sizeof(msg), "<Idle|MPos:%s,%s,0.000|FS:0,0>\r\n", xs, ys);
-    HAL_UART_Transmit(huart, (uint8_t*)msg, len, 100);
+    format_float3(g_off_x, wxs, sizeof(wxs));
+    format_float3(g_off_y, wys, sizeof(wys));
+    int len = snprintf(msg, sizeof(msg), "<%s|MPos:%s,%s,0.000|FS:0,0|WCO:%s,%s,0.000>\r\n", alarm_active ? "Alarm" : "Idle", xs, ys, wxs, wys);
+    /* si todavia hay un tx en curso, lo dejo para la proxima vuelta */
+    if (huart->gState != HAL_UART_STATE_READY) { status_report_pending = 1; return; }
+    /* por interrupcion: no frena al micro 3.5 ms (eso causaba tirones) */
+    HAL_UART_Transmit_IT(huart, (uint8_t*)msg, len);
+}
+
+/* tx bloqueante normal, pero antes espera a que termine el tx por
+ * interrupcion del status, si no HAL devuelve BUSY y se pierde el ok */
+static void uart_tx(UART_HandleTypeDef *h, uint8_t *p, uint16_t n, uint32_t to)
+{
+    uint32_t t0 = HAL_GetTick();
+    while (h->gState != HAL_UART_STATE_READY && (HAL_GetTick() - t0) < 20) { }
+    HAL_UART_Transmit(h, p, n, to);
+}
+
+/* atiende todo lo que las interrupciones dejaron pendiente (alarma,
+ * bienvenida, estado). se llama desde el while principal y TAMBIEN
+ * desde stepper_move_to mientras espera que termine un movimiento
+ * largo. eso es lo que evita que laser grbl crea que la placa se colgo
+ * ("StopResponding"): antes, durante un movimiento de varios segundos
+ * no salia ningun mensaje, ahora el '?' se sigue contestando.
+ *
+ * es seguro transmitir ac porque siempre se llama desde el contexto del
+ * main (nunca desde una isr), y los pasos los sigue dando la
+ * interrupcion del timer sin que esta transmision los demore */
+static void service_realtime(void)
+{
+    watchdog_refresh(); /* se llama desde el while principal y desde la espera de cada movimiento */
+    if (alarm_message_pending) {
+        alarm_message_pending = false;
+        char alarm[160];
+        int n = snprintf(alarm, sizeof(alarm),
+            MSG_ALARM_LIMIT_FMT,
+            alarm_limit_axis);
+        uart_tx(&huart2, (uint8_t*)alarm, n, 100);
+    }
+    if (welcome_pending) {
+        welcome_pending = 0;
+        g_off_x = 0.0f; /* un reset (ctrl-x) borra el offset de trabajo */
+        g_off_y = 0.0f;
+        const char *welcome = MSG_WELCOME;
+        uart_tx(&huart2, (uint8_t*)welcome, strlen(welcome), 100);
+    }
+    if (status_report_pending) {
+        status_report_pending = 0;
+        send_status_report(&huart2);
+    }
 }
 
 /* ejecuta el movimiento que quedo "pendiente" esperando a ver si el
@@ -627,11 +737,11 @@ static void flush_pending_move(bool exit_at_cruise)
     if (!g_pending.valid) return;
     static bool last_entered_at_cruise = false;
 
-    if (g_pending.is_rapid) {
-        laser_force_off_for_rapid();
-    } else if (g_pending.has_laser_s) {
-        laser_set_power(g_pending.laser_s);
-    }
+    /* el estado del laser para este movimiento se fija ACA, justo antes
+     * de ejecutarlo, y no cuando llego la linea. rapid = es un g0 (la
+     * salida va a 0). has_laser_s = la linea traia un s nuevo (el s es
+     * modal: si no viene, se sigue usando el ultimo) */
+    laser_begin_segment(g_pending.is_rapid, g_pending.has_laser_s, g_pending.laser_s);
 
     motors_enable();
     stepper_move_to(g_pending.target_x, g_pending.target_y, g_pending.feed,
@@ -654,7 +764,7 @@ static void process_gcode_line(char *raw_line)
      * porque si no nunca se podria salir de la alarma */
     if (raw_line[0] == '$' && raw_line[1] == 'X' && raw_line[2] == '\0') {
         alarm_active = false;
-        HAL_UART_Transmit(&huart2, (uint8_t*)"ok\r\n", 4, 100);
+        uart_tx(&huart2, (uint8_t*)MSG_OK, 4, 100);
         return;
     }
 
@@ -662,8 +772,8 @@ static void process_gcode_line(char *raw_line)
      * improviso), rechazo cualquier otra cosa que llegue hasta que
      * manden $X. ni siquiera llego a parsear la linea */
     if (alarm_active) {
-        const char *err = "ALARM: Máquina bloqueada por un final de carrera. Mandá $X para desbloquear.\r\n";
-        HAL_UART_Transmit(&huart2, (uint8_t*)err, strlen(err), 100);
+        const char *err = MSG_ERR_LOCKED;
+        uart_tx(&huart2, (uint8_t*)err, strlen(err), 100);
         return;
     }
 
@@ -684,17 +794,28 @@ static void process_gcode_line(char *raw_line)
                  * vuelvo a fijar ac por las dudas, no cuesta nada */
                 stepper_set_position(0.0f, 0.0f);
                 z_axis_set_position(0.0f);
-                HAL_UART_Transmit(&huart2, (uint8_t*)"ok\r\n", 4, 100);
+                g_off_x = 0.0f; /* despues de homing el cero anterior ya no vale */
+                g_off_y = 0.0f;
+                uart_tx(&huart2, (uint8_t*)MSG_OK, 4, 100);
             } else {
-                const char *err = "ALARM: Homing falló (algún switch nunca se activó)\r\n";
-                HAL_UART_Transmit(&huart2, (uint8_t*)err, strlen(err), 100);
+                const char *err = MSG_ALARM_HOMING;
+                uart_tx(&huart2, (uint8_t*)err, strlen(err), 100);
             }
             return;
+        } else if (raw_line[1] == '$' && raw_line[2] == '\0') {
+            /* $$ es "mostrame la configuracion". contesto lo minimo para
+             * que laser grbl sepa que hay modo laser ($32=1), y asi
+             * ofrezca M4 (potencia dinamica). $30 es la potencia maxima
+             * (la misma LASER_S_MAX que uso en laser.c) y $31 la minima */
+            char cfg[48];
+            int n = snprintf(cfg, sizeof(cfg), "$30=%d\r\n$31=0\r\n$32=1\r\n", (int)LASER_S_MAX);
+            uart_tx(&huart2, (uint8_t*)cfg, n, 100);
+            uart_tx(&huart2, (uint8_t*)MSG_OK, 4, 100);
+            return;
         } else {
-            /* otros comandos $ (tipo $$, $G, etc) por ahora solo los
-             * confirmo sin hacer nada, para que laser grbl no se quede
-             * esperando una respuesta que nunca llega */
-            HAL_UART_Transmit(&huart2, (uint8_t*)"ok\r\n", 4, 100);
+            /* cualquier otro comando $ no esta implementado: aviso con
+             * error (no es alarma, la maquina sigue andando normal) */
+            uart_tx(&huart2, (uint8_t*)MSG_ERR_UNKNOWN_SYS, strlen(MSG_ERR_UNKNOWN_SYS), 100);
             return;
         }
     }
@@ -702,15 +823,70 @@ static void process_gcode_line(char *raw_line)
     GcodeCommand cmd = {0};
     if (gcode_parse_line(gcode_str, &cmd)) {
 
+        /* comando no reconocido: aviso con error y ignoro la linea
+         * entera. no es una alarma, la maquina no se bloquea ni se
+         * apagan los motores, simplemente sigue con la linea que viene */
+        if (cmd.has_unknown) {
+            uart_tx(&huart2, (uint8_t*)MSG_ERR_UNKNOWN, strlen(MSG_ERR_UNKNOWN), 100);
+            return;
+        }
+
+        /* tope de velocidad: si piden una F mayor al maximo, la descarto,
+         * aviso con un [MSG] y la recorto al maximo. no es una
+         * alarma: la linea se ejecuta igual y el trabajo sigue */
+        if (cmd.has_f && cmd.f > MAX_FEED_MM_MIN) {
+            char warn[64];
+            int fdef = (int)MAX_FEED_MM_MIN;
+            int n = snprintf(warn, sizeof(warn), MSG_WARN_FEED_FMT, (int)cmd.f, fdef);
+            uart_tx(&huart2, (uint8_t*)warn, n, 100);
+            cmd.f = MAX_FEED_MM_MIN;
+        }
+
     	/* si esta linea NO es una continuacion de movimiento (viene un
     	 * g0, un cambio de z, apagar el laser, o desactivar motores),
     	 * primero tengo que ejecutar lo que haya quedado pendiente del
     	 * encadenado de segmentos. sino ese ultimo tramo se perderia o
     	 * se mezclaria mal con esta linea nueva */
-        if (cmd.has_g90) g_absolute_mode = 1;
-        if (cmd.has_g91) g_absolute_mode = 0;
+    	if (cmd.has_z || cmd.has_m5 || cmd.has_m84) {
+    	    flush_pending_move(false);
+    	}
+
+        /* g92 fija el origen de trabajo donde esta la maquina ahora (o
+         * en el valor dado). primero termino cualquier movimiento
+         * pendiente para conocer la posicion real. g92.1 borra el offset */
+        if (cmd.has_g92 || cmd.has_g92_1) {
+            flush_pending_move(false);
+            float mx, my;
+            stepper_get_position(&mx, &my);
+            if (cmd.has_g92_1) {
+                g_off_x = 0.0f;
+                g_off_y = 0.0f;
+            } else if (!cmd.has_x && !cmd.has_y) {
+                g_off_x = mx;   /* g92 sin ejes: cero de trabajo aca */
+                g_off_y = my;
+            } else {
+                if (cmd.has_x) g_off_x = mx - cmd.x;
+                if (cmd.has_y) g_off_y = my - cmd.y;
+            }
+        }
+
+        /* la F es modal: si viene en una linea sin movimiento (ej. "M3 S30 F1000")
+         * hay que recordarla igual para los G1 que vienen despues */
+        if (cmd.has_f) g_last_feed_mm_min = cmd.f;
+
+        /* en un jog ($J=G91 X10 ...) el G90/G91 vale SOLO para esa linea y
+         * no cambia el modo del programa, como en grbl. si lo cambiara,
+         * despues de mover con las flechas el framing y los trabajos se
+         * interpretarian como relativos */
+        uint8_t abs_mode = g_absolute_mode;
+        if (cmd.has_g90) abs_mode = 1;
+        if (cmd.has_g91) abs_mode = 0;
+        if (!is_jog) g_absolute_mode = abs_mode;
         if (cmd.has_m3 || cmd.has_m4) {
             laser_enable();
+            /* m3 = potencia constante, m4 = potencia dinamica (la
+             * potencia sigue a la velocidad, ver laser.c) */
+            laser_set_dynamic(cmd.has_m4);
         }
         if (cmd.has_m84) {
             motors_disable();
@@ -721,21 +897,29 @@ static void process_gcode_line(char *raw_line)
         if (cmd.has_m5) {
             laser_disable();
         }
+        /* s suelto (sin x/y): ejecuto antes el movimiento pendiente para respetar el orden */
+        if (cmd.has_s && !cmd.has_x && !cmd.has_y) {
+            flush_pending_move(false);
+            laser_set_power(cmd.s);
+        }
         uint8_t explicit_motion = (cmd.type == GCODE_G0 || cmd.type == GCODE_G1);
         if (explicit_motion) g_last_motion = cmd.type;
 
         /* en todo g0 apago el laser de una, sin importar si la linea
          * trae s o no. esto imita lo que hace un grbl real en modo
          * laser: nunca se quiere que el laser quede prendido durante
-         * un traslado rapido, es una cuestion de seguridad */
-        if (cmd.type == GCODE_G0) {
+         * un traslado rapido, es una cuestion de seguridad. lo dejo
+         * ACA (al llegar la linea) ademas de en el flush, para que el
+         * laser no quede prendido y quieto en m3 mientras el g0 espera
+         * en la cola */
+        if (cmd.type == GCODE_G0 && !g_pending.valid) {
             laser_force_off_for_rapid();
         }
 
         /* should_move me dice si esta linea trae alguna coordenada de
          * x o y (gcode modal: puede venir sin g0/g1 explicito y aun
          * asi ser un movimiento valido, eso ya lo resuelve el parser) */
-        uint8_t should_move = (cmd.has_x || cmd.has_y);
+        uint8_t should_move = (cmd.has_x || cmd.has_y) && !cmd.has_g92;
         (void)g_last_motion; /* reservado para cuando distingamos velocidad G0 vs G1 */
 
         /* si hay que moverse pero los motores estan desactivados (m84),
@@ -743,14 +927,9 @@ static void process_gcode_line(char *raw_line)
          * veces seguidas de cuando lo fui armando, no hace falta pero
          * tampoco rompe nada dejarlo asi */
         if (should_move && !motors_are_enabled()) {
-            const char *warn = "WARNING: Motores desactivados (M84). Mandá M17 para reactivar.\r\n";
-            HAL_UART_Transmit(&huart2, (uint8_t*)warn, strlen(warn), 100);
+            const char *warn = MSG_WARN_MOTORS_OFF;
+            uart_tx(&huart2, (uint8_t*)warn, strlen(warn), 100);
             should_move = 0; /* no ejecutamos el movimiento */
-        }
-        if (should_move && !motors_are_enabled()) {
-            const char *warn = "WARNING: Motores desactivados (M84). Mandá M17 para reactivar.\r\n";
-            HAL_UART_Transmit(&huart2, (uint8_t*)warn, strlen(warn), 100);
-            should_move = 0;
         }
 
         if (should_move) {
@@ -766,9 +945,11 @@ static void process_gcode_line(char *raw_line)
             }
 
             float target_x, target_y;
-            if (g_absolute_mode) {
-                target_x = cmd.has_x ? cmd.x : cur_x;
-                target_y = cmd.has_y ? cmd.y : cur_y;
+            if (abs_mode) {
+                /* las coordenadas llegan en sistema de trabajo: sumo el
+                 * offset para obtener la posicion real de maquina */
+                target_x = cmd.has_x ? (cmd.x + g_off_x) : cur_x;
+                target_y = cmd.has_y ? (cmd.y + g_off_y) : cur_y;
             } else {
                 target_x = cur_x + (cmd.has_x ? cmd.x : 0.0f);
                 target_y = cur_y + (cmd.has_y ? cmd.y : 0.0f);
@@ -780,8 +961,8 @@ static void process_gcode_line(char *raw_line)
              * ninguna esquina fisica de verdad */
             if (target_x < 0.0f || target_x > WORKSPACE_X_MAX_MM ||
                 target_y < 0.0f || target_y > WORKSPACE_Y_MAX_MM) {
-                const char *err = "ALARM: Movimiento fuera del área de trabajo\r\n";
-                HAL_UART_Transmit(&huart2, (uint8_t*)err, strlen(err), 100);
+                const char *err = MSG_WARN_OUT_XY;
+                uart_tx(&huart2, (uint8_t*)err, strlen(err), 100);
             } else {
                 if (cmd.has_f) {
                     g_last_feed_mm_min = cmd.f;
@@ -807,6 +988,11 @@ static void process_gcode_line(char *raw_line)
                     bool continues = (dot > 0.999f);
                     flush_pending_move(continues);
                 }
+                /* el g1 anterior ya termino de ejecutarse (flush es
+                 * bloqueante), recien ahora apago el laser para el g0 */
+                if (cmd.type == GCODE_G0) {
+                    laser_force_off_for_rapid();
+                }
 
                 /* esta linea queda como la nueva pendiente, todavia no
                  * se ejecuta: se ejecuta recien cuando llegue la
@@ -829,23 +1015,23 @@ static void process_gcode_line(char *raw_line)
         /* el eje z se maneja aparte, no entra en el encadenado de
          * segmentos de x/y (normalmente se usa para ajustar el foco
          * antes de grabar, no en medio de un trazo) */
-        if (cmd.has_z) {
+        if (cmd.has_z && !cmd.has_g92) {
             if (!motors_are_enabled()) {
-                const char *warn = "WARNING: Motores desactivados (M84). Mandá M17 para reactivar.\r\n";
-                HAL_UART_Transmit(&huart2, (uint8_t*)warn, strlen(warn), 100);
+                const char *warn = MSG_WARN_MOTORS_OFF;
+                uart_tx(&huart2, (uint8_t*)warn, strlen(warn), 100);
             } else {
                 float target_z;
                 float cur_z;
                 z_axis_get_position(&cur_z);
-                if (g_absolute_mode) {
+                if (abs_mode) {
                     target_z = cmd.z;
                 } else {
                     target_z = cur_z + cmd.z;
                 }
                 float feed = cmd.has_f ? cmd.f : g_last_feed_mm_min;
                 if (target_z < 0.0f || target_z > WORKSPACE_Z_MAX_MM) {
-                    const char *err = "ALARM: Movimiento fuera del área de trabajo (Z)\r\n";
-                    HAL_UART_Transmit(&huart2, (uint8_t*)err, strlen(err), 100);
+                    const char *err = MSG_WARN_OUT_Z;
+                    uart_tx(&huart2, (uint8_t*)err, strlen(err), 100);
                 } else {
                     z_axis_move_to(target_z, feed);
                 }
@@ -855,7 +1041,7 @@ static void process_gcode_line(char *raw_line)
     /* respondo ok al final de cualquier linea que haya llegado hasta
      * aca (haya hecho algo o no), porque laser grbl necesita este ok
      * para saber que puede mandar la siguiente linea de la cola */
-    HAL_UART_Transmit(&huart2, (uint8_t*)"ok\r\n", 4, 100);
+    uart_tx(&huart2, (uint8_t*)MSG_OK, 4, 100);
 }
 
 /* interrupcion de recepcion de uart: se dispara una vez por cada byte
@@ -896,34 +1082,42 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
  * de un movimiento normal (no durante el homing a proposito), corta
  * todo al instante sin importar en que estaba ocupado el firmware en
  * ese momento */
+/* confirma que el pin sigue en bajo durante window_us, usando el contador
+ * de ciclos dwt (ya lo habilita homing_init, asi que tiene que estar corriendo) */
+static bool limit_still_low(uint16_t pin, uint32_t window_us)
+{
+    uint32_t start = DWT->CYCCNT;
+    uint32_t cycles = window_us * (SystemCoreClock / 1000000U);
+    while ((DWT->CYCCNT - start) < cycles) {
+        if (HAL_GPIO_ReadPin(GPIOB, pin) != GPIO_PIN_RESET) return false;
+    }
+    return true;
+}
+
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     if (homing_is_active()) {
-        /* si estamos homeando, tocar el switch es justo lo que se
-         * espera que pase, asi que no hago nada aca: lo maneja el
-         * propio homing.c con su propio polling */
         return;
     }
 
     if (GPIO_Pin == X_LIMIT_PIN || GPIO_Pin == Y_LIMIT_PIN || GPIO_Pin == Z_LIMIT_PIN) {
+        if (!limit_still_low(GPIO_Pin, 200)) {
+            return; /* fue un pico, no un toque real */
+        }
+
         stepper_emergency_stop();
         z_axis_emergency_stop();
         laser_disable();
-        g_pending.valid = false; /* descarto cualquier movimiento que hubiera quedado en cola */
+        g_pending.valid = false;
+        motors_disable(); /* final de carrera: motores sin corriente */
 
-        /* los switches mecanicos rebotan (hacen varios contactos en
-         * milisegundos por una sola pulsada fisica), asi que esta
-         * interrupcion se puede disparar varias veces seguidas por un
-         * solo choque real. por eso solo prendo la bandera del mensaje
-         * la primera vez, para no mandar el aviso repetido un monton
-         * de veces */
         if (!alarm_active) {
+            alarm_limit_axis = (GPIO_Pin == X_LIMIT_PIN) ? 'X' : (GPIO_Pin == Y_LIMIT_PIN) ? 'Y' : 'Z';
             alarm_message_pending = true;
         }
         alarm_active = true;
     }
 }
-
 /* interrupcion del timer: se llama cada vez que vence el periodo
  * configurado, tanto para tim2 (pasos de x/y) como para tim4 (pasos de
  * z). cada uno delega a su propio modulo */

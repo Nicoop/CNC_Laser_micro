@@ -1,4 +1,5 @@
 #include "z_axis.h"
+#include "watchdog.h"
 #include <math.h>
 #include <stdlib.h>
 
@@ -118,6 +119,7 @@ void z_axis_move_to(float z_mm, float feed_mm_min)
 
     /* bloqueante, igual que stepper_move_to() */
     while (s_move.move_active) {
+        watchdog_refresh(); /* sigo pateando al watchdog durante la espera */
         __WFI();
     }
 }
