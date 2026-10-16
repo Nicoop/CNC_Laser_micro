@@ -13,6 +13,8 @@
 \usetikzlibrary{arrows.meta,positioning}
 \usepackage{pdflscape}
 \usepackage{xurl}
+\usepackage[section]{placeins}
+\addto\captionsspanish{\renewcommand{\refname}{Referencias}\renewcommand{\tablename}{Tabla}}
 
 %% Document metadata
 \journalname{}
@@ -50,7 +52,7 @@
 %% Abstract and keywords must be defined BEFORE \maketitle
 \begin{abstract}
 
-Se presenta el desarrollo de un controlador para una CNC de grabado y corte láser, basado en una placa NUCLEO-F446RE. Se describen la estructura mecánica adoptada, las interfaces eléctricas y el firmware modular en C. Las instrucciones generadas con LaserGRBL se reciben por UART, se interpretan y se convierten en consignas para el mecanismo CoreXY y el eje Z. La coordinación de los motores utiliza interpolación discreta y temporizadores, mientras que el accionamiento del láser se comanda mediante PWM. El documento corresponde a un avance del proyecto; la caracterización experimental y las conclusiones se incorporarán al completar los ensayos.
+Se presenta el diseño y la implementación de una CNC láser basada en una placa NUCLEO-F446RE. El firmware interpreta instrucciones G-code enviadas desde LaserGRBL, coordina el movimiento CoreXY y el eje Z mediante motores paso a paso y genera el mando PWM del cabezal. Se describen la estructura mecánica, las interfaces eléctricas, la organización modular, la referenciación y el tratamiento de límites. Las pruebas funcionales permitieron completar el homing de los tres ejes, observar la detención ante finales de carrera y obtener un grabado sobre MDF de 5~mm de espesor nominal. La validación disponible es cualitativa: no se determinaron valores de exactitud o repetibilidad y no se considera validada la capacidad de corte. Se identifican las limitaciones de la implementación y las mejoras de protección, acondicionamiento y diagnóstico previstas.
 
 \end{abstract}
 
@@ -61,7 +63,8 @@ Se presenta el desarrollo de un controlador para una CNC de grabado y corte lás
 
 \onecolumn
 \raggedbottom
-{\small\tableofcontents}
+\setlength{\emergencystretch}{1.5em}
+{\small\setlength{\parskip}{0pt}\tableofcontents}
 \clearpage
 % \twocolumn
 
@@ -104,9 +107,8 @@ funcionamiento del sistema mediante ensayos de movimiento
 y grabado.
 
 
-
 % ============================================================================= %
-\section{Descripción General del Sistema}
+\section{Descripción general del sistema}
 
 La máquina desarrollada consiste en un sistema de control numérico computarizado (CNC) destinado al grabado y al corte mediante láser. Durante estos procesos, el cabezal es desplazado respecto de la pieza siguiendo una trayectoria definida por instrucciones G-code, mientras que el accionamiento del láser es coordinado con el movimiento.
 
@@ -116,26 +118,56 @@ Las trayectorias de trabajo son definidas mediante un archivo G-code generado en
 
 El sistema incorpora finales de carrera para establecer una referencia de posición mediante un procedimiento de referenciación o \textit{homing}. A partir de dicha referencia, los desplazamientos son determinados mediante las consignas y los pasos comandados a los motores. El posicionamiento se realiza en lazo abierto, sin medición continua de la posición del cabezal.
 
-% Diagrama general y fotografías: pendientes de incorporación.
 
 % ============================================================================= %
-\section{Sistema Mecánico y Actuadores}
+
+La Figura~\ref{fig:sistema-general} resume los bloques
+funcionales y distingue las consignas de movimiento,
+el mando del láser y las entradas de referencia.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+font=\small,
+block/.style={draw=blue!45!black,fill=blue!3,rounded corners=2pt,
+align=center,text width=2.6cm,minimum height=1cm},
+arr/.style={-{Latex[length=2mm]},draw=blue!50!black},
+lab/.style={font=\scriptsize,fill=white,inner sep=2pt}]
+\node[block] (pc) at (0,0) {Computadora\\LaserGRBL};
+\node[block] (mcu) at (4,0) {NUCLEO-F446RE\\Firmware propio};
+\node[block] (tb) at (8,1.4) {Tres TB6600\\Canales A, B y Z\\{\scriptsize STEP / DIR / ENA}};
+\node[block] (mot) at (12,1.4) {Cuatro motores\\Dos CoreXY y dos Z};
+\node[block] (pda) at (8,-1.4) {P-DA-01\\Interfaz del láser};
+\node[block] (laser) at (12,-1.4) {LT-40W-F23\\Cabezal láser};
+\node[block] (lim) at (4,2.4) {Tres finales de carrera\\X, Y y Z};
+\draw[arr] (pc.east)--node[lab,above,align=center]{UART\\USB}(mcu.west);
+\draw[arr] (lim.south)--node[lab,right]{GPIO}(mcu.north);
+\draw[arr] (mcu.east)--++(.6,0)|-(tb.west);
+\draw[arr] (tb.east)--node[lab,above]{bobinas}(mot.west);
+\draw[arr] (mcu.south)|-node[lab,pos=.75,above]{PWM}(pda.west);
+\draw[arr] (pda.east)--(laser.west);
+\end{tikzpicture}
+\caption{Bloques funcionales de la CNC. Las conexiones de potencia y las referencias eléctricas se detallan en la Figura~\ref{fig:esquematico-electrico}.}
+\label{fig:sistema-general}
+\end{figure}
+
+\section{Sistema mecánico, hardware e interfaces eléctricas}
+\label{sec:hardware}
 
 \subsection{Armadura de la CNC}
-La armadura se construyó a partir del diseño \textit{Core XY}, publicado por Javierarnedo en Thingiverse~\cite{estructura_thingiverse}. Se conservaron los perfiles y la configuración del bastidor. Las dimensiones exteriores y el recorrido útil deben relevarse en la máquina; los límites definidos en el firmware no equivalen a esas medidas.
+La armadura se construyó a partir del diseño \textit{Core XY}, publicado por Javierarnedo en Thingiverse~\cite{estructura_thingiverse}. Se conservaron los perfiles y la configuración del bastidor. No se dispone de un relevamiento dimensional del montaje; los límites configurados en el firmware no se utilizan como medidas del bastidor ni como recorridos útiles comprobados.
 
-Se utilizaron perfiles ranurados de aluminio de sección nominal $20\times20\,\mathrm{mm}$, dispuestos en dos marcos rectangulares unidos mediante cuatro montantes. Las uniones atornilladas y las escuadras permiten fijar los soportes de guiado y transmisión. La alineación del bastidor y la ausencia de holguras en las uniones condicionan la geometría del recorrido.
+Se utilizaron perfiles ranurados de aluminio, dispuestos en dos marcos rectangulares unidos mediante cuatro montantes. Las uniones atornilladas y las escuadras permiten fijar los soportes de guiado y transmisión. La alineación del bastidor y la ausencia de holguras en las uniones condicionan la geometría del recorrido.
 
-% Fotografías del bastidor y medidas: pendientes de incorporar por los autores.
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[height=4.5cm,keepaspectratio]{attachments/Armadura.jpg}
+    \hfill
+    \includegraphics[height=4.5cm,keepaspectratio]{attachments/Armadura2.jpg}
+    \caption{Diseño mecánico de referencia y recorrido de correas CoreXY~\cite{estructura_thingiverse}. Las imágenes ilustran la arquitectura adoptada; no constituyen fotografías del prototipo láser ni representan su mecanismo Z definitivo.}
+    \label{fig:armadura}
+\end{figure}
 
-\subsection{Motores paso a paso}
-El mecanismo se acciona mediante cuatro motores bipolares: dos para la transmisión CoreXY y dos para Z. Su identificación se presenta en la Subsección~\ref{subsec:motores-seleccionados}; la conversión de desplazamientos en pulsos se desarrolla en la Sección~\ref{sec:movimiento}.
-
-El posicionamiento es de lazo abierto. Los finales de carrera establecen una referencia, pero no proporcionan una medición continua del cabezal. La pérdida de pasos, las holguras y la deformación de las correas pueden producir diferencias entre la posición lógica y la física.
-% ============================================================================= %
-
-\section{Hardware e Interfaces Eléctricas}
-\label{sec:hardware}
 
 \subsection{Microcontrolador seleccionado}
 
@@ -183,6 +215,15 @@ permite concentrar en un mismo microcontrolador
 la interpretación de instrucciones, la coordinación
 del movimiento y el comando de los actuadores.
 
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[height=6.0cm,keepaspectratio]{attachments/nucleo.jpg}
+    \hfill
+    \includegraphics[height=8.0cm,keepaspectratio]{attachments/nucleo_conexiones.png}
+    \caption{Referencia mecánica de la placa NUCLEO-64 y asignación de conectores. Para el proyecto se utiliza la variante F446RE; las señales empleadas se reúnen en la Tabla~\ref{tab:senales-electricas}.}
+    \label{fig:nucleo}
+\end{figure}
+
 \subsection{Motores seleccionados}
 \label{subsec:motores-seleccionados}
 Para el accionamiento de la máquina se utilizaron
@@ -205,9 +246,7 @@ de paso, dirección y habilitación.
 La denominación NEMA~17 identifica el tamaño
 de la brida de montaje y no determina por sí sola
 la corriente nominal, el ángulo de paso ni el par
-disponible. Por ello, la caracterización de los
-actuadores debe completarse mediante la documentación
-correspondiente al modelo utilizado.
+disponible. No se dispone de la ficha específica de corriente y par del ejemplar instalado; estos datos no se deducen del tamaño de brida.
 
 \begin{table}[htbp]
     \centering
@@ -226,7 +265,7 @@ correspondiente al modelo utilizado.
         Cantidad instalada & Cuatro motores \\
         Lote relevado & \texttt{202331120} \\
         Ángulo utilizado por el firmware & $1{,}8^\circ$\\
-        Corriente y par nominales & Pendientes de ficha del modelo \\
+        Corriente y par nominales & Sin ficha específica disponible \\
         \hline
     \end{tabular}
 \end{table}
@@ -238,17 +277,109 @@ La conversión a pulsos por revolución y por milímetro se desarrolla en la Sec
 con el ángulo nominal del motor y con el ajuste
 de micropaso seleccionado en los drivers.
 
-El ajuste de corriente de cada TB6600 debe
-establecerse a partir de la corriente nominal
-de los bobinados. Para el canal Z debe considerarse,
-además, la conexión de dos motores en paralelo,
-puesto que la corriente suministrada por el driver
-se distribuye entre los bobinados de ambos actuadores.
-El valor seleccionado y la configuración de los
-interruptores DIP quedan pendientes de documentar.
+El ajuste eléctrico y su relación con la conexión de los motores se describen en la Subsección~\ref{subsec:drivers}. No se dispone de un registro de las posiciones DIP utilizadas.
 
+\begin{figure}[htbp]
+    \centering
+    
+    
+    \includegraphics[width=0.23\linewidth]{attachments/NEMA17_Esquematico.png}
+    \caption{Esquema funcional de las dos bobinas de un motor bipolar. Las letras identifican extremos de bobina; no establecen el orden de terminales ni los colores del motor instalado.}
+    \label{fig:NEMA17}
+\end{figure}
+
+\subsection{Láser seleccionado}
+
+Como herramienta de trabajo se utiliza
+un módulo láser LASER TREE LT-40W-F23,
+destinado a operaciones de grabado y corte.
+El conjunto integra el emisor láser,
+la óptica de enfoque, la electrónica
+de accionamiento y un sistema de
+refrigeración mediante disipador
+y ventilador.
+
+Según la documentación del fabricante~\cite{laser_manual},
+su potencia óptica es de
+$5 \pm 1$~W y su longitud de onda
+es de $450 \pm 10$~nm, correspondiente
+a la región azul del espectro visible.
+La denominación LT-40W-F23 identifica
+el modelo y no debe interpretarse
+como una potencia óptica de 40~W.
+
+Las principales características declaradas
+por el fabricante se presentan en
+la Tabla~\ref{tab:caracteristicas_laser}.
+
+\begin{table}[htbp]
+    \centering
+    \caption{Características declaradas del módulo
+    láser LASER TREE LT-40W-F23.}
+    \label{tab:caracteristicas_laser}
+    \begin{tabular}{ll}
+        \hline
+        \textbf{Parámetro} & \textbf{Especificación} \\
+        \hline
+        Potencia óptica & $5 \pm 1$~W \\
+        Longitud de onda & $450 \pm 10$~nm \\
+        Tensión de alimentación & 12~V CC \\
+        Corriente de entrada & 1,5--2~A \\
+        Distancia de enfoque declarada & 23~mm \\
+        Frecuencia de modulación & Hasta 5~kHz \\
+        Nivel de mando indicado & 0/5--12~V \\
+        Temperatura de operación & 0--60~$^\circ$C \\
+        Conector & XH2.54 de tres terminales \\
+        Masa del módulo & 230~g \\
+        \hline
+    \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.49\linewidth]{attachments/Infografía del módulo láser LT-40W-F23 (1).png}
+    \hfill
+    \includegraphics[width=0.49\linewidth]{attachments/Infografía del módulo láser LT-40W-F23 (2).png}
+    \caption{Cabezal LT-40W-F23, accesorios y dimensiones de referencia del fabricante. Estas imágenes de producto no son fotografías del montaje experimental.}
+    \label{fig:ModuloLaser}
+\end{figure}
+
+La interfaz del cabezal utiliza tres
+conductores: alimentación positiva,
+referencia GND y entrada PWM.
+Esta disposición permite mantener
+la alimentación del módulo y modificar
+su accionamiento mediante la señal
+de control, sin utilizar la salida
+del microcontrolador para suministrar
+la corriente del emisor.
+
+El cabezal se encuentra montado sobre
+el mecanismo de desplazamiento del eje Z.
+Este movimiento permite ajustar su posición
+respecto de la pieza para establecer
+la condición de enfoque. Para el grabado,
+el fabricante indica que el foco debe
+situarse sobre la superficie del material.
+La referencia mecánica utilizada para
+realizar ese ajuste debe respetar
+las indicaciones de montaje del módulo.
+
+El accionamiento se establece mediante PWM; los modos y la relación entre consigna y salida se desarrollan en la Sección~\ref{sec:referenciacion-laser}. La potencia óptica indicada en la tabla es un dato del fabricante, no una medición del proyecto.
+
+La posibilidad de grabar o cortar una pieza
+depende del material, su espesor,
+el enfoque, la velocidad de avance
+y la consigna de accionamiento.
+Por ello, las prestaciones de la máquina
+deben establecerse mediante ensayos,
+sin deducirse únicamente de la potencia
+nominal del cabezal.
 
 \subsection{Drivers seleccionados}
+\label{subsec:drivers}
+
+\subsubsection{TB6600 -- Accionamiento de los motores}
 
 Para el accionamiento de los motores paso a paso
 se utilizaron módulos driver comercializados como
@@ -257,7 +388,7 @@ de comando generadas por el microcontrolador y
 establecer la excitación de los bobinados necesaria
 para producir el movimiento.
 
-Mediante estos módulos se separa la generación
+Mediante estos módulos se distingue la generación
 de las consignas de movimiento del suministro
 de energía a los motores. El microcontrolador
 determina la cantidad de pulsos, su frecuencia
@@ -306,17 +437,14 @@ la cantidad de pulsos requeridos por vuelta
 y reducir el incremento angular nominal asociado
 a cada pulso.
 
-El firmware supone una subdivisión de $1/16$ de paso. La posición de los interruptores DIP debe corresponder a ese valor; el ajuste de corriente depende del motor y no se deduce del tamaño NEMA. Para Z, la corriente del driver se reparte entre los dos motores conectados en paralelo. La conversión de esta configuración a pulsos se presenta en la Sección~\ref{sec:movimiento}.
+La posición de los interruptores debe corresponder a la subdivisión utilizada por el firmware. En Z, la corriente del driver se reparte entre los dos motores conectados en paralelo; por ello, el ajuste debe considerar las dos ramas y no solamente un motor. La conversión de micropasos a desplazamiento se desarrolla en la Sección~\ref{sec:movimiento}.
 
 \paragraph{Características eléctricas.}
 
 En la Tabla~\ref{tab:tb6600} se resumen las
 especificaciones recopiladas para el módulo.
-Estos valores deben contrastarse con la documentación
-de la versión instalada. La tensión de alimentación,
-la corriente seleccionada y la posición de los
-interruptores DIP utilizados en la CNC se
-documentarán junto con el esquema de conexiones.
+La alimentación del montaje se documenta en el esquema de conexiones. Los demás valores proceden de la información comercial recopilada; no se dispone de una ficha que identifique la versión del módulo ni de un registro de sus ajustes DIP.
+
 
 \begin{table}[htbp]
     \centering
@@ -345,13 +473,70 @@ documentarán junto con el esquema de conexiones.
         \hline
     \end{tabular}
     \caption{Especificaciones recopiladas del módulo
-    TB6600, pendientes de verificación documental.
-    Debe confirmarse si los valores de corriente
-    indicados corresponden a corriente pico o eficaz.}
+    TB6600 según la información comercial aportada. No se identifica la revisión del módulo ni si la corriente declarada es pico o eficaz.}
     \label{tab:tb6600}
 \end{table}
 
 La frecuencia de PUL gobierna la velocidad de la secuencia de excitación. El límite de 20~kHz es un dato declarado para el módulo, no una velocidad experimental de la CNC; el par disponible también depende de la alimentación, la corriente y la velocidad.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.25\linewidth]{attachments/tb6600.jpg}
+    
+    \caption{Aspecto ilustrativo de un módulo TB6600. El conexionado de la CNC se presenta en la Figura~\ref{fig:esquematico-electrico}.}
+    \label{fig:TB6600}
+\end{figure}
+
+\subsubsection{P-DA-01 -- Interfaz del láser}
+
+La conexión entre el sistema de control,
+la alimentación y el cabezal láser se realiza
+mediante una placa adaptadora P-DA-01.
+Su función es facilitar la interconexión
+de estos elementos mediante conectores
+de alimentación y de señal TTL/PWM.
+
+Debe distinguirse esta placa del driver
+propio del cabezal, encargado del accionamiento
+del diodo láser. La P-DA-01 constituye
+una interfaz de conexión y distribución
+de alimentación~\cite{laser_manual}; la documentación disponible
+no permite atribuirle funciones de regulación
+de corriente ni de aislamiento galvánico.
+
+La placa dispone de distintas entradas
+para adaptar el conexionado de la unidad
+de control y de salidas de tres terminales
+hacia el módulo láser. Estas últimas
+comprenden la alimentación positiva,
+la referencia GND y la señal de mando PWM.
+También incorpora una entrada de alimentación
+externa de corriente continua y un selector
+EXT/INT, mediante el cual se selecciona
+la alimentación externa o la procedente
+del conexionado de entrada. Dos indicadores
+luminosos permiten comprobar la presencia
+de alimentación y de la señal de control.
+
+En el firmware del proyecto, la señal
+de mando del láser es generada por el canal~1
+del temporizador TIM3 y se encuentra
+asignada al pin PC6 del microcontrolador.
+Su frecuencia es de 1~kHz y su ciclo
+de trabajo se modifica para establecer
+la consigna de accionamiento del cabezal.
+La alimentación del láser es suministrada
+por la fuente de la máquina, mientras
+que la salida del microcontrolador
+proporciona únicamente la señal de mando.
+
+\begin{figure}
+    \centering
+        \includegraphics[width=0.49\linewidth]{attachments/P-DA-01 (1).jpg}
+    \hfill
+    \includegraphics[width=0.49\linewidth]{attachments/P-DA-01 (2).jpg}
+    \caption{Interfaz P-DA-01 y descripción ilustrativa de sus conexiones. La cantidad de terminales puede variar entre revisiones; el orden del montaje no se deduce únicamente de la imagen}
+\end{figure}
 
 \subsection{Conexiones eléctricas}
 
@@ -367,12 +552,11 @@ y las señales de control utilizadas por el firmware.
 Se dispone de una fuente con entrada de
 $220\,\mathrm{V}$ de corriente alterna y salidas de
 $24\,\mathrm{V}$, $12\,\mathrm{V}$ y $5\,\mathrm{V}$ de corriente continua.
+La salida de 12~V también se representa como alimentación del cabezal, en correspondencia con la tabla específica del LT-40W-F23. Aunque los diagramas genéricos del manual mencionan 12/24~V, esa indicación no se interpreta como autorización para alimentar este modelo con 24~V.
 La alimentación de potencia de los drivers TB6600
 se realiza mediante la salida de $12\,\mathrm{V}$,
 con los tres módulos conectados en paralelo.
-La placa NUCLEO-F446RE se alimenta mediante
-[completar: USB o alimentación externa].
-La salida de $5\,\mathrm{V}$ y el modo de alimentación de la NUCLEO quedan pendientes de confirmar. El esquema conecta la alimentación del módulo de accionamiento del láser a la red de 12~V; falta contrastar esa conexión con la identificación del módulo instalado.
+La placa NUCLEO-F446RE se alimenta desde la computadora mediante la conexión USB del ST-LINK, que también proporciona el puerto serie virtual.
 
 En el esquema se distinguen las alimentaciones
 de potencia, las tensiones utilizadas por las
@@ -392,50 +576,7 @@ a una conexión de ánodo común: los terminales
 \texttt{PUL+}, \texttt{DIR+} y \texttt{ENA+}
 se conectan a $3{,}3\,\mathrm{V}$, y los terminales
 negativos reciben las señales de los GPIO.
-La correspondencia entre señales y pines se presenta en la Tabla~\ref{tab:senales-electricas}. La conexión a 3,3~V documentada en el código debe contrastarse con los 5~V declarados para las entradas del módulo. La habilitación de tres entradas en paralelo también requiere comprobar la corriente conjunta sobre PC7; el esquema no constituye una validación eléctrica de esa carga.
-
-\paragraph{Conexión de los motores.}
-Cada motor bipolar dispone de dos bobinas.
-Los terminales \texttt{A+} y \texttt{A-} del driver
-se conectan a los extremos de una bobina,
-y los terminales \texttt{B+} y \texttt{B-},
-a los extremos de la otra.
-
-Los motores CoreXY se identifican como M1 (A) y M2 (B) en el esquema. Cada uno dispone de un driver; estas letras deben distinguirse de A+/A- y B+/B-, que identifican las bobinas. Para el eje Z,
-el firmware documenta dos motores conectados
-en paralelo a un mismo driver. El esquema muestra las ramificaciones de cada salida hacia M3 y M4, correspondientes a los dos motores de Z.
-
-\paragraph{Interfaz con los finales de carrera.}
-Se utilizan tres señales de límite, correspondientes
-a X, Y y Z, conectadas a PB0, PB1 y PB2,
-respectivamente. Los módulos de final de carrera
-se representan mediante sus terminales de alimentación,
-masa y señal, conservando la identificación
-del conector utilizado.
-
-El firmware configura estas entradas con resistencias
-internas de polarización a masa e interpreta
-un nivel bajo como la activación del límite.
-Por lo tanto, debe comprobarse que la salida
-de los módulos presente el nivel de reposo
-y de activación esperado por el programa.
-El esquema identifica alimentación de 3,3~V, masa y señal. La identificación exacta del módulo y el orden de los terminales deben comprobarse en el montaje.
-
-\paragraph{Interfaz con el accionamiento del láser.}
-La señal de control del láser se genera mediante
-el canal 1 de TIM3 y se obtiene en PC6,
-disponible en el terminal 4 del conector CN10
-de la NUCLEO-F446RE. Esta red se identifica
-como \texttt{LASER\_PWM}.
-
-Con la configuración del temporizador utilizada
-en el firmware, la frecuencia nominal de la señal
-es de $1\,\mathrm{kHz}$. Su ciclo de trabajo
-es modificado para establecer la consigna
-de accionamiento del módulo láser.
-La red PC6 llega al módulo de accionamiento y no directamente al diodo láser. El firmware identifica la función de control; la tensión admitida por esa entrada y la correspondencia del símbolo \texttt{P-DA-01} con el módulo instalado quedan pendientes de verificar.
-
-
+La correspondencia entre señales y pines se presenta en la Tabla~\ref{tab:senales-electricas}. El uso de 3,3~V difiere del nivel comercial declarado de 5~V para los TB6600. Sin el circuito de entrada de la versión instalada ni mediciones de corriente y umbral, no se afirma que el conexionado proporcione los márgenes eléctricos requeridos.
 
 
 \begin{table}[htbp]
@@ -463,11 +604,49 @@ La red PC6 llega al módulo de accionamiento y no directamente al diodo láser. 
     \end{tabular}
 \end{table}
 
+\paragraph{Conexión de los motores.}
+Cada motor bipolar dispone de dos bobinas.
+Los terminales \texttt{A+} y \texttt{A-} del driver
+se conectan a los extremos de una bobina,
+y los terminales \texttt{B+} y \texttt{B-},
+a los extremos de la otra.
+
+Los motores CoreXY se identifican como M1 (A) y M2 (B) en el esquema. Cada uno dispone de un driver; estas letras deben distinguirse de A+/A- y B+/B-, que identifican las bobinas. Para el eje Z,
+el firmware documenta dos motores conectados
+en paralelo a un mismo driver. El esquema muestra las ramificaciones de cada salida hacia M3 y M4, correspondientes a los dos motores de Z.
+
+\paragraph{Interfaz con los finales de carrera.}
+Se utilizan tres señales de límite, correspondientes
+a X, Y y Z, conectadas a PB0, PB1 y PB2,
+respectivamente. Los módulos de final de carrera
+se representan mediante sus terminales de alimentación,
+masa y señal, conservando la identificación
+del conector utilizado.
+
+El firmware configura estas entradas con resistencias
+internas de polarización a masa e interpreta
+un nivel bajo como la activación del límite.
+Por lo tanto, debe comprobarse que la salida
+de los módulos presente el nivel de reposo
+y de activación esperado por el programa.
+El esquema identifica alimentación de 3,3~V, masa y señal. No se dispone de la identificación exacta del módulo ni de un relevamiento del orden de terminales; el funcionamiento observado no sustituye esa caracterización.
+
+\paragraph{Interfaz con el accionamiento del láser.}
+La señal de control del láser se genera mediante
+el canal 1 de TIM3 y se obtiene en PC6,
+disponible en el terminal 4 del conector CN10
+de la NUCLEO-F446RE. Esta red se identifica
+como \texttt{LASER\_PWM}.
+
+La temporización del PWM se describe en la Sección~\ref{sec:referenciacion-laser}.
+La red PC6 llega a la interfaz P-DA-01 y no directamente al diodo láser. El manual identifica una entrada PWM de 0/5--12~V, pero no especifica un umbral que garantice el reconocimiento de 3,3~V. No se dispone de una caracterización eléctrica de esta conexión; se registra como limitación en la Subsección~\ref{subsec:limites-validacion}.
+
+
 \begin{landscape}
 \begin{figure}[p]
     \centering
     \includegraphics[width=0.98\linewidth]{attachments/Esquematico.pdf}
-    \caption{Esquema de interconexión elaborado en KiCad. Se conserva el original: el símbolo de la placa está rotulado F411RE, mientras que la placa y el firmware del proyecto corresponden a F446RE. Debe corregirse esa identificación en KiCad y verificar los conectores del montaje.}
+    \caption{Esquema de interconexión elaborado en KiCad. El original utiliza un símbolo rotulado F411RE, mientras que la placa y el firmware corresponden a F446RE. La tabla de señales identifica las redes GPIO del proyecto; este esquema no acredita por sí solo la correspondencia física de todos los conectores.}
     \label{fig:esquematico-electrico}
 \end{figure}
 \end{landscape}
@@ -476,13 +655,13 @@ La red PC6 llega al módulo de accionamiento y no directamente al diodo láser. 
 \clearpage
 
 % ============================================================================= %
-\section{Arquitectura del Firmware}
+\section{Arquitectura del firmware}
 \label{sec:arquitectura}
 
 \subsection{Organización modular}
 
 El firmware fue desarrollado en lenguaje C mediante
-una organización modular. La descripción se contrasta con el commit \texttt{688d31a} del repositorio del proyecto~\cite{firmware_proyecto}. Las responsabilidades
+una organización modular. Las responsabilidades
 del sistema se distribuyen entre módulos de
 interpretación de instrucciones, generación
 de movimiento, referenciación, control del láser
@@ -512,33 +691,16 @@ ocultamiento del estado interno permite modificar su
 representación sin alterar la interfaz utilizada por
 los demás módulos.
 
-Las dependencias funcionales se muestran en la Figura~\ref{fig:modulos-actuales}. Se utilizan bloques de módulos C, no clases de una implementación orientada a objetos. El diagrama UML elaborado durante el desarrollo se conserva como antecedente; las interfaces actuales incluyen también el watchdog y la regulación dinámica del láser.
+Las dependencias funcionales se muestran en la Figura~\ref{fig:modulos-actuales}. Cada bloque representa un módulo C con una interfaz propia. Las marcas de visibilidad son una adaptación gráfica y no implican una implementación orientada a objetos. 
 
-\begin{figure}[htbp]
-\centering
-\begin{tikzpicture}[font=\small,mod/.style={draw,rounded corners,align=center,minimum width=2.6cm,minimum height=0.8cm}, dep/.style={-{Latex},thin}]
-\node[mod] (main) at (0,0) {\texttt{main.c}\\Coordinación};
-\node[mod] (parser) at (-4,2) {\texttt{gcode\_parser}};
-\node[mod] (ena) at (0,2) {\texttt{motor\_enable}};
-\node[mod] (homing) at (4,2) {\texttt{homing}};
-\node[mod] (step) at (-4,-2) {\texttt{stepper}\\CoreXY / TIM2};
-\node[mod] (laser) at (0,-2) {\texttt{laser}\\PWM / TIM3};
-\node[mod] (z) at (4,-2) {\texttt{z\_axis}\\Z / TIM4};
-\node[mod] (wd) at (4,-4) {\texttt{watchdog}\\IWDG};
-\foreach \dest in {parser,ena,homing,step,laser,z} \draw[dep] (main)--(\dest);
-\draw[dep] (step)--node[above]{velocidad}(laser);
-\draw[dep] (homing.east) -- ++(0.8,0) |- (z.east);
-\draw[dep] (homing.north) -- ++(0,0.6) -| (step.west);
-\draw[dep] (z)--(wd);
-\draw[dep] (main.east) -- ++(1.1,0) |- (wd.west);
-\draw[dep] (homing.east) -- ++(1.3,0) |- (wd.east);
-\draw[dep,dashed] (step.north) to[out=65,in=210] (main.south west);
-\end{tikzpicture}
-\caption{Dependencias de ejecución entre módulos. Las flechas parten del módulo que utiliza la interfaz; la línea discontinua representa la callback de servicio registrada por \texttt{main.c}.}
-\label{fig:modulos-actuales}
-\end{figure}
 
-La Figura~\ref{fig:estructura-firmware} muestra la estructura de la copia de trabajo. El repositorio remoto sitúa \texttt{Core/} y \texttt{Drivers/} en la raíz; la carpeta local \texttt{Code/} los agrupa sin alterar sus responsabilidades.
+%    \centering
+% \includegraphics[width=0.5\linewidth]{attachments/UML_Diagram.png}
+%    \caption{Diagrama tipo UML para esquematizar las responsabilidades de los módulos}
+    %\label{fig:UMLDiagram}
+
+
+La Figura~\ref{fig:estructura-firmware} muestra una selección de archivos de la carpeta \texttt{Code/}, utilizada tanto en la copia local como en el repositorio revisado. El contraste se realizó con la revisión \texttt{0ce7b21}, cuyo código fuente coincide con el utilizado en este informe~\cite{firmware_proyecto}.
 
 \begin{figure}[htbp]
     \centering
@@ -572,6 +734,24 @@ Code/
     Se agrupan nombres en algunas filas y se abrevian los archivos de soporte y las bibliotecas.}
     \label{fig:estructura-firmware}
 \end{figure}
+
+\begin{landscape}
+\begin{figure}[p]
+    \centering
+    \resizebox{\linewidth}{!}{%
+        \input{attachments/arquitectura-modulos.tex}%
+    }
+    \caption{Organización modular del firmware.
+    Cada bloque identifica un módulo C,
+    su responsabilidad y una selección
+    de sus operaciones. Las flechas indican
+    llamadas a interfaces; se distinguen
+    las dependencias de supervisión y
+    la invocación mediante callback.
+    Las firmas se presentan abreviadas.}
+    \label{fig:modulos-actuales}
+\end{figure}
+\end{landscape}
 
 \paragraph{Coordinación de la aplicación: \texttt{main.c}.}
 En este archivo se inicializan los periféricos y los
@@ -662,7 +842,7 @@ de referenciación, habilitación de motores,
 movimiento del eje Z, movimiento CoreXY
 y control del láser. También se inicia
 la recepción de datos por interrupción
-y se transmite el mensaje de bienvenida. Si el reinicio anterior fue provocado por el watchdog, se activa la alarma y se informa la pérdida de referencia de posición. La limpieza mediante \texttt{\$X} no sustituye una nueva referenciación.
+y se transmite el mensaje de bienvenida. Si el reinicio anterior fue provocado por el watchdog, se activa la alarma y se informa la pérdida de referencia de posición. La limpieza mediante \texttt{\$X} no sustituye una nueva referenciación, aunque el programa no la exige antes de aceptar otra consigna.
 
 Una vez completada la inicialización,
 el programa permanece en un lazo principal.
@@ -719,12 +899,10 @@ La Figura~\ref{fig:flujo-firmware} resume el flujo de llamadas del programa prin
 \label{fig:flujo-firmware}
 \end{figure}
 
-Cuando se confirma un límite fuera del homing, la callback detiene los movimientos, deshabilita el láser y los motores, invalida el pendiente y activa \texttt{alarm\_active}. Al comenzar a procesar una nueva línea, se rechazan las instrucciones distintas de \texttt{\$X}. También puede activarse la alarma al arrancar después de un reinicio por watchdog. Un mensaje de fallo de homing no establece esa bandera en la versión revisada.
-
-Este bloqueo no se comprueba en todos los puntos del flujo. Tras un retorno por interrupción, una línea ya iniciada puede volver a almacenar un pendiente; además, el timeout no comprueba la alarma. La figura describe las llamadas efectivas y no supone un estado exclusivo de detención que el código no garantiza.
+Una interrupción de límite puede modificar las banderas durante cualquiera de estas llamadas. El retorno al procesamiento interrumpido explica que la alarma no constituya un estado exclusivo que reemplace el flujo de ejecución. El tratamiento de límites y las restricciones de este bloqueo se desarrollan en la Sección~\ref{sec:referenciacion-laser}.
 % ============================================================================= %
 
-\section{Comunicación e Interpretación de G-Code}
+\section{Comunicación e interpretación de G-code}
 \label{sec:comunicacion}
 
 \subsection{Generación y envío de instrucciones mediante LaserGRBL}
@@ -843,7 +1021,7 @@ La Figura~\ref{fig:recepcion-parser} distingue recepción, análisis y ejecució
 opcional, dígitos y una parte decimal opcional.
 Esta función evita interpretar la secuencia
 \texttt{0X10} de una instrucción \texttt{G0X10}
-como un número hexadecimal. Durante las pruebas se detectó que la conversión de propósito general consumía la X y su valor como parte del número, en lugar de reconocer una nueva palabra. El lector decimal corrige ese caso; no admite notación científica y no sustituye una validación sintáctica completa.
+como un número hexadecimal. El comentario de implementación documenta que una conversión de propósito general podía consumir la X y su valor como parte del número, en lugar de reconocer una nueva palabra. El lector decimal corrige ese caso; no admite notación científica y no sustituye una validación sintáctica completa.
 
 \begin{figure}[htbp]
 \centering
@@ -1022,46 +1200,99 @@ El reporte de estado utiliza \texttt{Idle} o \texttt{Alarm}, conserva Z y los ca
 
 
 % ============================================================================= %
-\section{Generación y Coordinación del Movimiento}
+\section{Generación y coordinación del movimiento}
 \label{sec:movimiento}
 
-\subsection{Cinemática del mecanismo CoreXY}
+\subsection{Cinemática y elección del mecanismo CoreXY}
 
-El desplazamiento del cabezal en el plano X--Y se
-realiza mediante un mecanismo CoreXY. En esta
-configuración, los motores A y B actúan sobre
-una transmisión de correas que acopla sus movimientos
-con las dos coordenadas cartesianas. Por lo tanto,
-ninguno de los motores corresponde exclusivamente
-al eje X o al eje Y.
+El desplazamiento del cabezal en el plano X--Y
+se realiza mediante un mecanismo CoreXY.
+En esta arquitectura, dos motores fijos
+a la estructura actúan sobre una transmisión
+de correas que combina sus movimientos
+para producir los desplazamientos cartesianos
+del cabezal. Por lo tanto, ninguno de los
+motores corresponde exclusivamente al eje X
+o al eje Y.
 
-La utilización de esta transformación en el firmware
-responde a la configuración mecánica adoptada.
-Las instrucciones G-code establecen destinos
-cartesianos, mientras que los actuadores requieren
-consignas de giro. En consecuencia, cada desplazamiento
-solicitado debe ser convertido en los movimientos
-correspondientes a los motores A y B.
+\paragraph{Criterios de elección.}
 
-Con la convención de signos utilizada en el proyecto,
-la transformación cinemática inversa se expresa como~\cite{corexy_teoria}:
+La adopción de CoreXY estuvo vinculada
+con la utilización del diseño mecánico
+de referencia, cuya estructura y disposición
+de transmisión fueron conservadas.
+Esta elección permitió concentrar el desarrollo
+del proyecto en las interfaces eléctricas,
+la interpretación de instrucciones y
+la implementación del control de movimiento.
 
-\begin{equation}
-    \Delta a = \Delta x + \Delta y,
-    \qquad
-    \Delta b = \Delta x - \Delta y,
-    \label{eq:corexy-inversa}
-\end{equation}
+Desde el punto de vista funcional,
+la arquitectura resulta adecuada para
+el posicionamiento de un cabezal láser.
+A diferencia de una disposición cartesiana
+de ejes independientes en la que un eje
+transporta el motor del otro, CoreXY permite
+mantener ambos motores de accionamiento
+fijos al bastidor. De esta manera,
+se evita incorporar su masa a los conjuntos
+móviles, lo que favorece la capacidad
+de aceleración del mecanismo
+\cite{corexy_fundamentos}.
 
-donde $\Delta x$ y $\Delta y$ son los desplazamientos
-cartesianos del cabezal, y $\Delta a$ y $\Delta b$
-representan los desplazamientos equivalentes
-de la transmisión asociados a los motores.
-Todas estas magnitudes se expresan en unidades
-de longitud.
+Esta característica es de interés para
+el grabado, donde se ejecutan desplazamientos
+sucesivos y cambios de sentido.
+Además, el procesamiento mediante láser
+no requiere transmitir las fuerzas
+de contacto propias de una herramienta
+de mecanizado, por lo que una transmisión
+por correas constituye una alternativa
+compatible con la aplicación prevista.
 
-La transformación cinemática directa permite obtener el desplazamiento
-cartesiano a partir de la actuación de ambos motores:
+CoreXY conserva un espacio de trabajo
+descrito mediante coordenadas cartesianas.
+La diferencia respecto de los ejes
+accionados de manera independiente
+se encuentra en la relación entre
+esas coordenadas y los motores:
+en CoreXY debe realizarse una transformación
+para obtener las consignas de ambos
+actuadores.
+
+\paragraph{Principio de funcionamiento.}
+
+El acoplamiento se obtiene mediante
+el recorrido de las correas y su vinculación
+con el conjunto móvil. Con la convención
+adoptada, las contribuciones de los motores
+se suman para producir el desplazamiento
+en X y se restan para producir
+el desplazamiento en Y
+\cite{corexy_teoria}.
+
+Puede interpretarse que un movimiento
+del motor A, manteniendo fijo el motor B,
+produce una combinación de desplazamientos
+en X e Y. La actuación del motor B aporta
+otra combinación que permite reforzar
+una componente y cancelar la otra.
+Así, la actuación coordinada de ambos
+motores permite obtener movimientos
+sobre los ejes cartesianos y trayectorias
+intermedias.
+
+Para expresar esta relación se definen
+$\Delta a$ y $\Delta b$ como los
+desplazamientos lineales equivalentes
+de la transmisión asociados a los
+motores A y B. Estas magnitudes se
+expresan en unidades de longitud;
+su conversión a cantidades de pulsos
+se realiza posteriormente mediante
+la relación de transmisión configurada.
+
+La transformación cinemática directa
+se expresa como:
 
 \begin{equation}
     \Delta x = \frac{\Delta a + \Delta b}{2},
@@ -1070,22 +1301,104 @@ cartesiano a partir de la actuación de ambos motores:
     \label{eq:corexy-directa}
 \end{equation}
 
-Estas relaciones muestran que un desplazamiento
-sobre un único eje cartesiano requiere la actuación
-de ambos motores. Para un movimiento exclusivamente
-en X, ambos desplazamientos tienen igual magnitud
-y signo. Para un movimiento exclusivamente en Y,
-tienen igual magnitud y signos opuestos.
+En consecuencia, cuando ambos motores
+producen desplazamientos equivalentes
+de igual magnitud y signo, la componente
+en Y se anula y se obtiene un movimiento
+exclusivamente en X. Cuando sus
+desplazamientos tienen igual magnitud
+y signos opuestos, se anula la componente
+en X y se obtiene un movimiento
+exclusivamente en Y.
 
-En cambio, cuando $\Delta x = \Delta y$, el
-desplazamiento correspondiente al motor B es nulo.
-Cuando $\Delta x = -\Delta y$, es nula la actuación
-del motor A. Estos casos corresponden a diagonales
-del plano cartesiano y permiten interpretar
-el acoplamiento del mecanismo.
+\paragraph{Transformación de las consignas.}
 
-Los sentidos físicos de giro dependen de la disposición
-de las correas, de la identificación de los motores y la conexión de sus bobinas. La convención del programa debe comprobarse con movimientos de prueba antes de interpretar las coordenadas como posiciones físicas.
+Las instrucciones G-code establecen
+destinos cartesianos, mientras que los
+actuadores requieren consignas de giro.
+Por ello, el firmware utiliza la
+transformación cinemática inversa
+para convertir cada desplazamiento
+solicitado en las actuaciones de
+los motores A y B:
+
+\begin{equation}
+    \Delta a = \Delta x + \Delta y,
+    \qquad
+    \Delta b = \Delta x - \Delta y.
+    \label{eq:corexy-inversa}
+\end{equation}
+
+Estas relaciones también permiten
+interpretar los movimientos diagonales.
+Cuando $\Delta x = \Delta y$,
+el desplazamiento correspondiente
+al motor B es nulo. Cuando
+$\Delta x = -\Delta y$, es nula
+la actuación del motor A.
+
+Los signos dependen de la disposición
+de las correas, de la identificación
+de los motores y de la conexión
+de sus bobinas. Por ello, la convención
+del programa debe comprobarse mediante
+movimientos de prueba sobre cada eje.
+
+La transformación determina la cantidad
+de movimiento requerida en cada actuador,
+pero no establece por sí sola su evolución
+temporal. Para conservar una trayectoria
+rectilínea, el firmware debe distribuir
+los pulsos de ambos motores de manera
+coordinada, manteniendo la proporción
+correspondiente al segmento solicitado.
+Esta tarea es realizada por el algoritmo
+de generación de pasos descrito
+en los apartados siguientes.
+
+\paragraph{Ventajas y limitaciones.}
+
+La principal ventaja de la arquitectura
+para esta aplicación es la reducción
+de masa móvil obtenida al mantener
+los motores sobre el bastidor.
+A ello se suma una transformación
+cinemática lineal, basada en sumas
+y restas, cuya implementación requiere
+un procesamiento reducido.
+
+Como contrapartida, la transmisión
+presenta un recorrido de correas
+y una disposición de poleas más
+complejos que los de dos ejes
+accionados de forma independiente.
+El montaje requiere controlar
+la alineación de los elementos,
+la escuadra del mecanismo y
+la tensión de las correas.
+Un ajuste inadecuado puede aumentar
+el rozamiento, favorecer deformaciones
+o afectar el desplazamiento del cabezal
+\cite{corexy_ajuste}.
+
+El acoplamiento también implica que
+un error de actuación de uno de los
+motores puede afectar simultáneamente
+a las dos coordenadas cartesianas.
+Por otra parte, la elasticidad de
+las correas y la rigidez del conjunto
+limitan la correspondencia entre
+el movimiento comandado y el obtenido.
+
+Por estas razones, la elección de CoreXY
+se justifica por su adecuación al
+cabezal y a las trayectorias previstas,
+junto con la disponibilidad del diseño
+mecánico adoptado. No se considera
+una garantía de mayor exactitud:
+las prestaciones alcanzadas deben
+comprobarse mediante ensayos sobre
+la máquina construida.
 
 \subsection{Conversión de desplazamientos en pulsos}
 
@@ -1288,9 +1601,7 @@ La rutina de interrupción genera los pulsos,
 actualiza el contador de avance y calcula
 la temporización siguiente.
 
-Para evitar cambios instantáneos de velocidad
-se implementan fases de aceleración, velocidad
-de crucero y desaceleración. Durante las rampas,
+Cuando no se solicita continuidad entre segmentos, se implementan fases de aceleración, velocidad de crucero y desaceleración. El lookahead puede omitir rampas de entrada o salida; no elimina necesariamente las discontinuidades al cambiar el avance entre segmentos. Durante las rampas,
 la velocidad de pasos se calcula a partir
 de una relación de la forma:
 
@@ -1304,10 +1615,9 @@ por segundo cuadrado y $n$ representa la cantidad
 de eventos recorridos durante la aceleración
 o restantes durante la desaceleración.
 
-El período entre eventos se obtiene como
-el inverso de la velocidad de pasos. También
-se establece un período mínimo configurado
-para limitar la frecuencia máxima de generación.
+El período entre eventos se obtiene como el inverso de la velocidad de pasos. El mínimo configurado es de 50~$\mu$s para X--Y y de 80~$\mu$s para Z. Estos valores limitan la temporización solicitada; los intervalos físicos también incluyen la ejecución de las rutinas. El avance máximo admitido por el procesamiento de líneas es de 3000~mm/min: las consignas F superiores se recortan y se informa un aviso, sin activar una alarma.
+
+La distancia de rampa X--Y configurada es de 3~mm. La aceleración se calcula para alcanzar la velocidad de crucero en esa distancia: no corresponde a una aceleración fija de máquina. Si se acorta una rampa para adaptarla al segmento, el firmware vuelve a calcular la aceleración sin aplicar un límite independiente.
 
 Las extensiones de las rampas se ajustan cuando
 el segmento no dispone del recorrido previsto
@@ -1405,16 +1715,525 @@ La exactitud y la repetibilidad deben evaluarse mediante ensayos de la máquina.
 
 
 % ============================================================================= %
-\section{Referenciación, Límites y Control del Láser}
-% Pendiente de desarrollo; excluida de la evaluación del avance.
+\section{Referenciación, límites y control del láser}
+\label{sec:referenciacion-laser}
+
+\subsection{Referenciación de los ejes}
+
+El posicionamiento se realiza en lazo abierto, a partir
+de los pasos comandados a los motores. Al encender
+la máquina, el valor inicial de las coordenadas
+no identifica por sí solo una ubicación física del
+cabezal. Para establecer esa correspondencia se
+implementa una rutina de referenciación, solicitada
+mediante el comando \texttt{\$H}.
+
+La función \texttt{homing\_run()} ejecuta la búsqueda
+de los finales de carrera en el orden Z, X e Y.
+La referenciación de Z se realiza primero para
+llevar el cabezal hacia la referencia superior
+antes de los desplazamientos del plano.
+Los ejes se atienden secuencialmente; si una búsqueda
+falla, no se continúa con los restantes.
+
+Para cada eje se realiza una primera aproximación
+al sensor, un retroceso de 8~mm, una segunda
+aproximación más lenta y una separación final
+de 4~mm. Los períodos nominales entre pulsos
+de búsqueda son de 200~$\mu$s y 2000~$\mu$s,
+respectivamente. La segunda aproximación reduce
+la velocidad con la que se alcanza el contacto,
+para disminuir los efectos dinámicos durante
+su accionamiento. La repetibilidad obtenida
+debe determinarse mediante ensayos.
+
+La Tabla~\ref{tab:secuencia-homing} resume las fases
+programadas para un eje. Los valores corresponden
+al firmware y no a una medición del ensayo.
+
+\begin{table}[htbp]
+\centering\small
+\caption{Secuencia programada de referenciación por eje.}
+\label{tab:secuencia-homing}
+\begin{tabularx}{\linewidth}{p{0.23\linewidth}XX}
+\hline
+Fase & Consigna o criterio de finalización & Finalidad \\
+\hline
+Primera aproximación & Pulsos con período nominal de 200~$\mu$s hasta contacto o máximo de iteraciones & Localizar el sensor. \\
+Retroceso & Desplazamiento positivo de 8~mm & Separarse del punto de contacto. \\
+Segunda aproximación & Pulsos con período nominal de 2000~$\mu$s hasta contacto o máximo de iteraciones & Reaproximarse a menor velocidad. \\
+Separación final & Desplazamiento positivo de 4~mm & Dejar el contacto liberado y fijar el cero lógico. \\
+\hline
+\end{tabularx}
+\end{table}
+
+El cero lógico se establece después de la separación
+final. Por lo tanto, la referencia de coordenadas
+no coincide con el punto de accionamiento del sensor,
+sino con la posición alcanzada tras ese retroceso.
+Si el ciclo completo finaliza correctamente,
+\texttt{main.c} fija las coordenadas lógicas en cero,
+borra los desplazamientos del origen de trabajo X--Y
+y transmite la respuesta \texttt{ok}.
+
+Las búsquedas tienen un máximo de 40000 iteraciones
+en X e Y y de 80000 en Z, para evitar una ejecución
+indefinida si no se detecta el contacto. Estos valores
+son límites de la rutina y no representan los recorridos
+útiles de la máquina. Si la referenciación falla,
+se informa \texttt{ALARM:9}. En la versión revisada,
+este mensaje no activa por sí solo la bandera
+\texttt{alarm\_active}; por ello, no debe confundirse
+con el bloqueo establecido ante un límite durante
+la operación normal.
+
+Durante las búsquedas se generan pulsos directamente
+mediante GPIO y se utiliza el contador de ciclos DWT
+para temporizar las esperas. Los retrocesos se solicitan
+a los módulos de movimiento CoreXY y Z. La rutina
+es bloqueante para el programa principal y refresca
+el watchdog durante sus retardos.
+
+\subsection{Finales de carrera y bloqueo por alarma}
+
+Se dispone de una entrada de final de carrera por eje.
+La lógica del firmware considera activo el nivel bajo.
+Durante la referenciación, los sensores son consultados
+por la rutina de búsqueda y su accionamiento se considera
+parte de la maniobra esperada.
+
+Fuera del homing, las entradas son atendidas mediante
+interrupciones externas. Antes de aceptar un evento,
+la función \texttt{limit\_still\_low()} comprueba que
+la señal permanezca en nivel bajo durante una ventana
+de 200~$\mu$s. Si vuelve al nivel alto dentro de ese
+intervalo, el evento es descartado. Esta confirmación
+temporal permite rechazar pulsos breves, pero no sustituye
+el acondicionamiento eléctrico de la entrada.
+
+Al confirmarse un límite, la callback solicita detener
+los movimientos CoreXY y Z, deshabilita el láser,
+invalida el segmento pendiente y deshabilita los drivers.
+También activa \texttt{alarm\_active} y solicita el envío
+de \texttt{ALARM:1}, junto con la identificación del eje.
+
+La condición de alarma es comprobada al comenzar
+el procesamiento de cada nueva línea. Mientras permanece
+activa, las líneas distintas de \texttt{\$X} son rechazadas.
+El comando \texttt{\$X} limpia la bandera, pero no habilita
+los motores ni reconstruye la referencia física.
+La habilitación se solicita mediante \texttt{M17};
+si la posición dejó de ser confiable, debe realizarse
+una nueva referenciación antes de retomar el trabajo.
+
+La comprobación al inicio de una línea no garantiza
+la cancelación de todo procesamiento que ya estuviera
+en curso cuando ocurrió la interrupción. En particular, una línea ya iniciada puede volver a almacenar un segmento, y la condición de ejecución por timeout no comprueba la alarma. El vaciado de ese segmento también habilita los motores. La revisión de estas condiciones constituye un punto de validación del manejo de alarmas. Los límites
+implementados son mecanismos de protección funcional
+del firmware y no constituyen una parada de emergencia
+independiente del microcontrolador.
+
+\subsection{Límites del espacio de trabajo}
+
+Además de los sensores físicos, el programa comprueba
+los destinos solicitados mediante límites de software.
+Los intervalos configurados son:
+
+\begin{equation}
+    0 \leq x \leq 240~\mathrm{mm},\qquad
+    0 \leq y \leq 200~\mathrm{mm},\qquad
+    0 \leq z \leq 130~\mathrm{mm}.
+\end{equation}
+
+Para X--Y, la comprobación se realiza sobre el destino
+expresado en coordenadas de máquina, después de aplicar
+el modo absoluto o relativo y los desplazamientos
+del origen de trabajo. En Z se verifica el destino
+calculado para ese eje. Si queda fuera del intervalo,
+se informa la condición y no se ejecuta ese desplazamiento;
+ello no activa la alarma de final de carrera.
+
+Estos valores corresponden a la configuración del
+firmware y deben contrastarse con los recorridos
+disponibles en el montaje. Su correspondencia con
+la ubicación física depende de la referenciación
+y de la conservación de la posición. La implementación
+no exige haber completado un homing antes de aceptar
+los movimientos, por lo que dicha condición debe
+ser respetada en la operación.
+
+\subsection{Accionamiento y modulación del láser}
+
+El módulo \texttt{laser} administra la habilitación
+y el ciclo de trabajo de la salida PWM. El temporizador
+TIM3 genera la señal de 1~kHz por el canal~1, asociado
+al pin PC6. La interfaz eléctrica del cabezal y sus
+características se describen en la sección de hardware.
+
+El parámetro \texttt{S} establece una consigna entre
+0 y 1000. El firmware limita el valor a ese intervalo
+y lo convierte en un valor de comparación entre
+0 y 999 para el temporizador. Esta consigna determina
+el accionamiento eléctrico, pero no constituye una
+medición de potencia óptica.
+
+\paragraph{Modo de accionamiento constante.}
+Con \texttt{M3}, el ciclo de trabajo programado
+se mantiene sin escalarlo con la velocidad.
+La habilitación no implica que deba emitirse
+inmediatamente: la aplicación efectiva de la salida
+depende de la consigna y del estado del segmento.
+En este modo, la detención del movimiento no fuerza
+por sí sola la salida PWM a cero.
+
+\paragraph{Modo de accionamiento dinámico.}
+Con \texttt{M4}, el ciclo de trabajo programado
+se escala mediante la relación entre la velocidad
+de consigna instantánea y la velocidad de crucero
+del segmento:
+
+\begin{equation}
+    D_{\mathrm{salida}} \approx D_{\mathrm{programado}}
+    \operatorname{sat}_{[0,1]}
+    \left(\frac{v_{\mathrm{consigna}}}{v_{\mathrm{crucero}}}\right).
+\end{equation}
+
+La expresión representa el escalado aplicado,
+sujeto a la cuantización del temporizador.
+El módulo \texttt{stepper} actualiza esa relación
+durante la ejecución del movimiento CoreXY.
+El objetivo es reducir el accionamiento durante
+las rampas de velocidad y limitar la concentración
+de energía por unidad de recorrido. No se utiliza
+una medición de velocidad ni una realimentación
+de potencia óptica; la uniformidad alcanzada
+debe evaluarse sobre las piezas procesadas.
+
+\paragraph{Traslados y deshabilitación.}
+En los segmentos identificados como \texttt{G0},
+se anula la salida independientemente de la consigna
+programada. La función \texttt{laser\_begin\_segment()}
+aplica el estado de traslado y el valor \texttt{S}
+asociados al segmento antes de su ejecución.
+
+El comando \texttt{M5} deshabilita el láser y borra
+la consigna almacenada. En consecuencia, para volver
+a obtener una salida distinta de cero debe establecerse
+nuevamente una consigna \texttt{S}, además de habilitar
+el modo correspondiente. La inicialización y la rutina
+de atención de límites también llevan la salida a cero.
+
+Estas acciones no deben extenderse a situaciones
+que el código no contempla expresamente: en particular,
+la recepción de \texttt{\$H} no incorpora un apagado
+explícito del láser. Su inhibición durante toda la
+referenciación constituye una mejora a considerar
+en la lógica de habilitación.
 
 % ============================================================================= %
-\section{Ensayos y Resultados}
-% Pendiente de desarrollo; excluida de la evaluación del avance.
+\section{Ensayos y resultados}
+\label{sec:ensayos}
+
+\subsection{Alcance de las pruebas}
+
+Los resultados de esta sección corresponden a las observaciones de puesta en marcha comunicadas por el equipo del proyecto. Se distinguen de los ejemplos numéricos y de la revisión del código de las secciones anteriores. La verificación se realizó mediante pruebas funcionales y observación directa del funcionamiento. Fueron comprobadas la rutina
+de referenciación, la respuesta ante los finales
+de carrera y la ejecución de un grabado sobre MDF.
+
+Los resultados disponibles son cualitativos.
+No se dispone de registros de medición que permitan
+cuantificar la exactitud del posicionamiento,
+la repetibilidad de la referenciación o los tiempos
+de respuesta. Por lo tanto, las observaciones
+presentadas permiten describir el funcionamiento
+alcanzado, pero no establecer tolerancias
+ni prestaciones metrológicas de la máquina.
+
+\subsection{Referenciación y respuesta a límites}
+
+Durante las pruebas, la rutina de referenciación
+completó la secuencia de los tres ejes y permitió
+establecer la posición inicial de trabajo.
+Se reportaron rebotes durante el accionamiento
+de los finales de carrera. Este comportamiento
+no fue caracterizado mediante registros eléctricos
+ni mediciones de repetibilidad, por lo que su efecto
+sobre la ubicación del cero no pudo cuantificarse.
+
+La observación identifica un punto a mejorar
+en el conjunto formado por el sensor, su montaje,
+el cableado y el tratamiento de la señal.
+Sin mediciones adicionales no puede atribuirse
+exclusivamente a una de estas causas.
+
+También se comprobó la respuesta ante el accionamiento
+de los finales de carrera durante un movimiento.
+Se observó la detención de la máquina al alcanzar
+el límite. No se dispone de mediciones de latencia
+ni de distancia de detención, por lo que el resultado
+se limita a la comprobación funcional de esa respuesta.
+
+Esta función no permite detectar obstáculos
+intermedios dentro del espacio de trabajo.
+El firmware no utiliza medición de corriente
+ni realimentación de posición para reconocer
+una colisión o una pérdida de pasos.
+Las posibles protecciones eléctricas internas
+de los drivers no equivalen a una detección
+de obstáculos por parte del sistema de control.
+
+\subsection{Prueba de grabado}
+
+Se realizó un grabado sobre una pieza de MDF
+de 5~mm de espesor nominal. La obtención del grabado
+permitió comprobar de manera integrada la ejecución
+de una trayectoria y el accionamiento del láser
+sobre el material.
+
+No se dispone de un registro completo de los
+parámetros empleados ni de mediciones dimensionales
+del resultado. En consecuencia, esta prueba
+documenta la capacidad de producir un grabado,
+pero no permite establecer una relación cuantitativa
+entre velocidad, consigna de láser y calidad obtenida.
+Tampoco permite deducir la capacidad de corte
+a partir del espesor de la pieza utilizada.
+
+El corte no se considera validado en esta etapa.
+Su comprobación queda condicionada a disponer
+de una superficie de apoyo adecuada para recibir
+la radiación que atraviese el material,
+sin deteriorar los elementos situados debajo.
+Por lo tanto, no se declara un espesor máximo
+de corte ni una cantidad de pasadas requerida.
+
+\subsection{Síntesis de los resultados}
+
+La Tabla~\ref{tab:resultados-observados} resume
+las comprobaciones disponibles y el alcance
+de sus conclusiones.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Resultados cualitativos de las pruebas del prototipo.}
+\label{tab:resultados-observados}
+\begin{tabularx}{\linewidth}{p{0.19\linewidth}XX}
+\hline
+\textbf{Función} & \textbf{Resultado observado} &
+\textbf{Alcance y limitaciones} \\
+\hline
+Referenciación &
+Se completó la secuencia de los tres ejes. &
+Se reportaron rebotes; no se cuantificó
+la repetibilidad del cero. \\
+Finales de carrera &
+Se observó la detención durante un movimiento. &
+No se midieron el tiempo ni la distancia
+de detención. \\
+Grabado &
+Se obtuvo un grabado sobre MDF de 5~mm. &
+No se dispone de una caracterización
+dimensional ni de los parámetros completos
+de procesamiento. \\
+Corte &
+Sin validación documentada. &
+Se requiere una superficie de apoyo adecuada
+antes de comprobar esta prestación. \\
+\hline
+\end{tabularx}
+\end{table}
+
+La Tabla~\ref{tab:objetivos-evidencia} vincula los objetivos
+con el desarrollo y con la evidencia disponible.
+La presencia de una función en el código no se toma
+como resultado experimental de todas sus condiciones
+de operación.
+
+\begin{table}[htbp]
+\centering\small
+\caption{Relación entre objetivos, implementación y verificación disponible.}
+\label{tab:objetivos-evidencia}
+\begin{tabularx}{\linewidth}{p{0.23\linewidth}XX}
+\hline
+Objetivo & Implementación & Evidencia y alcance \\
+\hline
+Interpretar instrucciones & UART y \texttt{gcode\_parser} & Funcionamiento integrado de grabado; no hay registro de cobertura de todas las variantes de comandos. \\
+Coordinar X--Y & CoreXY, interpolación y TIM2 & Trayectoria de grabado ejecutada; sin medición del error de seguimiento. \\
+Posicionar Z & Generación de pasos mediante TIM4 & Referenciación Z completada; el ajuste de enfoque no fue caracterizado por separado. \\
+Establecer una referencia & Homing con tres sensores & Secuencia completada con rebotes reportados; sin medida de repetibilidad. \\
+Comandar el láser & PWM y modos M3/M4 & Grabado obtenido; sin comparación experimental entre modos ni medida de potencia óptica. \\
+\hline
+\end{tabularx}
+\end{table}
+
+Las pruebas permiten documentar el funcionamiento
+de la referenciación, la respuesta a los límites
+y la integración de movimiento y láser para grabado.
+La evaluación de exactitud, repetibilidad y capacidad
+de corte requiere ensayos específicos adicionales.
+
 
 % ============================================================================= %
-\section{Limitaciones y Conclusiones}
-% Pendiente de desarrollo; excluida de la evaluación del avance.
+\section{Limitaciones y conclusiones}
+\subsection{Limitaciones y alcance de la validación}
+\label{subsec:limites-validacion}
+
+El alcance demostrado corresponde a la referenciación,
+la respuesta funcional ante límites y el grabado
+documentados en la Sección~\ref{sec:ensayos}.
+No se dispone de mediciones de exactitud, repetibilidad,
+latencia de detención o potencia óptica. El corte
+no fue validado sobre una superficie de apoyo adecuada.
+
+La revisión del código identifica restricciones
+adicionales: la compatibilidad con GRBL es parcial,
+el lookahead conserva un segmento y no planifica
+transiciones generales de velocidad, y las posiciones
+informadas son lógicas. Las comprobaciones de alarma
+no cancelan todos los caminos de ejecución ya iniciados;
+el fallo de homing no enclava la alarma y no existe
+una inhibición explícita del láser al recibir
+\texttt{\$H}. Estas restricciones de diseño se distinguen
+de los rebotes observados durante la puesta en marcha.
+
+La documentación física también tiene un alcance
+limitado. La Tabla~\ref{tab:alcance-documental}
+identifica los datos que no pueden reconstruirse
+a partir del programa. Su ausencia no se sustituye
+por valores de catálogo de componentes similares.
+
+\begin{table}[htbp]
+\centering\small
+\caption{Alcance de la caracterización física disponible.}
+\label{tab:alcance-documental}
+\begin{tabularx}{\linewidth}{p{0.23\linewidth}XX}
+\hline
+Elemento & Información disponible & Límite de la documentación \\
+\hline
+Bastidor y recorridos & Diseño de referencia y geometría general & No se dispone del relevamiento dimensional del montaje. \\
+Motores y drivers & Modelo 17HS3401, lote e hipótesis de conversión del firmware & Sin ficha específica de corriente y par ni registro de ajustes DIP de la unidad. \\
+Interfaces de control & GPIO de 3,3~V; datos comerciales de entradas & No se verificaron umbrales y corrientes de entrada ni márgenes de compatibilidad. \\
+Esquema KiCad & Redes y señales identificadas & El símbolo representa F411RE; el proyecto utiliza F446RE. Se interpreta por las redes GPIO declaradas, no como pinout validado. \\
+Prueba de grabado & Resultado sobre MDF de 5~mm & Sin registro completo de avance, consigna S y pasadas ni fotografía de la pieza incorporada al informe. \\
+\hline
+\end{tabularx}
+\end{table}
+
+\subsection{Mejoras previstas}
+
+Las observaciones de puesta en marcha y la revisión
+del diseño permiten definir los siguientes pasos.
+Se priorizó la integración funcional del prototipo;
+las modificaciones propuestas requieren diseño
+y verificación antes de ser incorporadas.
+
+\paragraph{Revisión de los bloqueos del firmware.}
+Se propone comprobar la alarma antes de iniciar
+cualquier movimiento y después de cada llamada
+bloqueante, descartar consignas pendientes al fallar
+la referenciación y mantener una condición explícita
+de posición válida. También se requiere inhibir
+el láser durante todo el homing. Estas modificaciones
+deben acompañarse con pruebas de las secuencias
+interrumpidas; no se consideran implementadas
+en la versión documentada.
+
+\paragraph{Separación entre potencia y control.}
+Se prevé verificar la barrera de aislamiento de las
+entradas de los TB6600 y comprobar que las conexiones
+de alimentación y masa no la anulen. La revisión debe
+incluir los niveles lógicos y las corrientes de entrada.
+Según los resultados, podrá incorporarse una interfaz
+de acondicionamiento o aislamiento adicional.
+La protección debe evaluarse sobre el circuito completo.
+
+\paragraph{Cableado y compatibilidad electromagnética.}
+Se propone separar los recorridos de potencia y señal,
+mantener próximo cada conductor a su retorno y utilizar
+pares trenzados y pantallas donde corresponda.
+En los motores, cada par debe reunir los conductores
+de una misma fase. Las terminaciones de las pantallas
+deben definirse en conjunto con el chasis, las referencias
+de señal y la tierra de protección.
+
+\paragraph{Placa de interfaz y entradas de sensores.}
+Una PCB específica permitiría concentrar conectores,
+protecciones y acondicionamiento, conservando inicialmente
+la NUCLEO. Para los finales de carrera se plantea
+incorporar resistencias de polarización externas
+y filtros RC compatibles con la lógica de contacto.
+Los valores deben atenuar perturbaciones sin introducir
+un retardo excesivo ni flancos incompatibles con las
+entradas digitales. Este criterio no se traslada
+directamente a las señales STEP y PWM.
+
+\paragraph{Guiado, transmisión y alimentación.}
+Se propone revisar la rectitud de las guías, las holguras,
+la alineación de los husillos Z y la tensión de correas,
+evaluando sus efectos mediante mediciones de posición.
+En la alimentación se prioriza una fuente comercial
+con capacidad y protecciones documentadas contra
+sobrecorriente, cortocircuito y sobretensión.
+Una entrada universal de 100--240~V y 50/60~Hz
+ampliaría la compatibilidad con redes eléctricas,
+siempre que esté especificada por el fabricante.
+
+\paragraph{Diagnóstico y caracterización.}
+Se plantea ampliar las consultas por terminal para
+visualizar estados, alarmas, escalas de conversión
+y límites configurados. Una HMI podría presentar
+esa información al operario. La lectura de tensiones
+reales requeriría circuitos de medición; la modificación
+de parámetros requeriría comprobación de rangos
+y almacenamiento persistente. Los estados calculados
+deben distinguirse de las magnitudes medidas.
+
+El siguiente ciclo de validación debe incluir
+mediciones de desplazamiento, repetición del homing
+y registro de las condiciones de grabado y corte.
+La identificación de estas mejoras expresa una revisión
+del diseño: su incorporación se difiere considerando
+el alcance del prototipo y el trabajo necesario
+para integrarlas y comprobar su efecto.
+
+\subsection{Conclusiones}
+\label{subsec:conclusiones}
+
+Se implementó un sistema de control capaz de interpretar
+instrucciones G-code, generar movimientos coordinados
+del mecanismo CoreXY, accionar el eje Z y comandar
+el láser mediante PWM. La organización modular permitió
+distribuir la interpretación, la referenciación y
+la generación de pasos entre interfaces específicas,
+con coordinación desde \texttt{main.c}.
+
+Las pruebas de puesta en marcha comprobaron
+la referenciación de los tres ejes, la detención
+al alcanzar los finales de carrera y la ejecución
+de un grabado sobre MDF. Estos resultados respaldan
+el funcionamiento integrado previsto por el objetivo
+general. La validación es cualitativa y no permite
+asignar tolerancias de posicionamiento, repetibilidad
+ni prestaciones de corte.
+
+El trabajo integra contenidos de sistemas embebidos,
+temporización por interrupciones, comunicación serie
+y accionamiento de motores paso a paso. La principal
+limitación del posicionamiento es la ausencia de
+realimentación: el conteo de pulsos representa
+una posición lógica y no comprueba la ejecución física.
+Las observaciones de rebote y las restricciones
+del manejo de alarmas muestran que el funcionamiento
+demostrado debe distinguirse de una validación integral
+de confiabilidad y protección.
+
+El objetivo de control y grabado se considera alcanzado
+al nivel de las comprobaciones documentadas.
+La capacidad de corte, la caracterización cuantitativa
+y la comprobación eléctrica de las interfaces
+delimitan el alcance de las conclusiones y constituyen
+la base para una siguiente revisión del prototipo.
 
 % ============================================================================= %
 
@@ -1422,6 +2241,7 @@ La exactitud y la repetibilidad deben evaluarse mediante ensayos de la máquina.
 
 %% References using BibTeX
 %% Make sure to compile with: pdflatex -> bibtex -> pdflatex -> pdflatex
+\FloatBarrier
 \clearpage
 \bibliographystyle{plain}
 \bibliography{references}
