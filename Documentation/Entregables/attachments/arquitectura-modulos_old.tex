@@ -1,0 +1,151 @@
+% Figura autónoma de paquetes: cargar tikz y arrows.meta en el preámbulo.
+% Dimensiones naturales: aproximadamente 26 x 17 cm; usar página apaisada.
+% Las operaciones se seleccionaron de los encabezados del firmware.
+\begin{tikzpicture}[
+  x=1cm,y=1cm,
+  font=\sffamily\fontsize{9}{11}\selectfont,
+  call/.style={-{Latex[length=2.1mm,width=1.5mm]},draw=archBlue,line width=.75pt,
+    rounded corners=2pt,preaction={draw=white,line width=3pt}},
+  support/.style={call,draw=archGray,dashed,line width=.6pt},
+  cb/.style={call,draw=archOrange,densely dotted,line width=1pt},
+  tag/.style={font=\sffamily\fontsize{8}{9}\selectfont,fill=white,
+    text=archInk,inner sep=2pt,align=center},
+  op/.style={anchor=north west,inner sep=0pt,align=left,
+    font=\ttfamily\fontsize{8.6}{11.5}\selectfont,text=archInk}
+]
+\definecolor{archInk}{HTML}{203247}
+\definecolor{archBlue}{HTML}{365E88}
+\definecolor{archTeal}{HTML}{287A79}
+\definecolor{archPurple}{HTML}{766094}
+\definecolor{archOrange}{HTML}{B87523}
+\definecolor{archGray}{HTML}{7C8793}
+\definecolor{archPaper}{HTML}{F5F7FA}
+
+% Caja: identificador, x, y, altura, color, título, responsabilidad, operaciones.
+\newcommand{\archmodule}[8]{%
+  \coordinate (#1-nw) at (#2,#3);
+  \coordinate (#1-ne) at (#2+7.4,#3);
+  \coordinate (#1-sw) at (#2,#3-#4);
+  \coordinate (#1-se) at (#2+7.4,#3-#4);
+  \path[draw=#5!55,line width=.65pt,fill=white,rounded corners=3pt]
+    (#1-nw) rectangle (#1-se);
+  \path[fill=#5!9] (#2+.015,#3-.015) rectangle (#2+7.385,#3-1.03);
+  \node[anchor=north west,inner sep=0pt,text=#5,
+    font=\sffamily\fontsize{7.5}{9}\selectfont]
+    at (#2+.22,#3-.14) {MÓDULO C};
+  \node[anchor=north west,inner sep=0pt,text=archInk,
+    font=\ttfamily\bfseries\fontsize{12}{14}\selectfont]
+    at (#2+.22,#3-.39) {#6};
+  \node[anchor=north west,inner sep=0pt,text=archInk,
+    font=\sffamily\fontsize{8.2}{10}\selectfont]
+    at (#2+.22,#3-.77) {#7};
+  \draw[#5!35,line width=.5pt] (#2,#3-1.03)--(#2+7.4,#3-1.03);
+  \node[op,text width=7cm] at (#2+.22,#3-1.23) {#8};
+}
+
+% Fila superior: coordinación e interfaces de aplicación.
+\archmodule{parser}{0}{0}{3.25}{archPurple}{gcode\_parser}
+  {Interpretación de una línea de G-code}
+  {+ gcode\_parse\_line(...)\\[5pt]
+   \normalfont\sffamily Salida: estructura \texttt{GcodeCommand}.\\
+   \normalfont\sffamily La conversión numérica es interna.}
+
+\archmodule{main}{9}{0}{3.8}{archBlue}{main.c}
+  {UART, comandos, segmentos pendientes y alarmas}
+  {+ main()\\
+   - process\_gcode\_line(...)\\
+   - flush\_pending\_move(...)\\
+   - service\_realtime()}
+
+\archmodule{ena}{18}{0}{3.25}{archTeal}{motor\_enable}
+  {Habilitación común de los drivers}
+  {+ motor\_enable\_init()\\
+   + motors\_enable()\\
+   + motors\_disable()\\
+   + motors\_are\_enabled()}
+
+% Fila central: referenciación y movimiento.
+\archmodule{homing}{0}{-5.5}{3.5}{archOrange}{homing}
+  {Referenciación Z, X e Y; lectura de límites}
+  {+ homing\_init()\\
+   + homing\_run()\\
+   + homing\_is\_active()\\[5pt]
+   \normalfont\sffamily Búsqueda directa: pulsos GPIO y DWT.}
+
+\archmodule{step}{9}{-5.5}{4.9}{archTeal}{stepper}
+  {Movimiento CoreXY e interrupción de TIM2}
+  {+ stepper\_init(...)\\
+   + stepper\_move\_to(...)\\
+   + stepper\_get\_position(...)\\
+   + stepper\_set\_position(...)\\
+   + stepper\_emergency\_stop()\\
+   + stepper\_timer\_isr()\\
+   + stepper\_set\_wait\_callback(...) }
+
+\archmodule{z}{18}{-5.5}{4.3}{archTeal}{z\_axis}
+  {Movimiento Z e interrupción de TIM4}
+  {+ z\_axis\_init(...)\\
+   + z\_axis\_move\_to(...)\\
+   + z\_axis\_get\_position(...)\\
+   + z\_axis\_set\_position(...)\\
+   + z\_axis\_emergency\_stop()\\
+   + z\_axis\_timer\_isr()}
+
+% Fila inferior: servicio compartido, láser y leyenda.
+\archmodule{wd}{0}{-12}{2.65}{archGray}{watchdog}
+  {Supervisión mediante IWDG}
+  {+ watchdog\_refresh()\\
+   + watchdog\_caused\_last\_reset()}
+
+\archmodule{laser}{9}{-12}{4.3}{archTeal}{laser}
+  {Accionamiento PWM mediante TIM3}
+  {+ laser\_init(...)\\
+   + laser\_enable() / laser\_disable()\\
+   + laser\_set\_power(...)\\
+   + laser\_set\_dynamic(...)\\
+   + laser\_begin\_segment(...)\\
+   + laser\_set\_speed\_ratio(...)}
+
+% Dependencias directas de main.c.
+\draw[call] (9,-1.8)--node[tag,above]{analiza}(7.4,-1.8);
+\draw[call] (16.4,-1.8)--node[tag,above]{habilita}(18,-1.8);
+\draw[call] (10,-3.8)--(10,-4.4)--(3.7,-4.4)--(3.7,-5.5);
+\draw[call] (12.7,-3.8)--node[tag,right]{ejecuta}(12.7,-5.5);
+\draw[call] (15.3,-3.8)--(15.3,-4.4)--(21.7,-4.4)--(21.7,-5.5);
+\draw[call] (16.4,-2.7)--(17.35,-2.7)--(17.35,-11.45)--(15.4,-11.45)--(15.4,-12);
+\node[tag,rotate=90] at (17.35,-8.1) {modo, potencia y segmento};
+
+% Colaboraciones entre módulos de movimiento y referenciación.
+\draw[call] (7.4,-7.2)--node[tag,above,text width=1.35cm]{mueve /\\fija cero}(9,-7.2);
+\draw[call] (7.4,-8.3)--(7.85,-8.3)--(7.85,-10.95)--(25.95,-10.95)--(25.95,-8.5)--(25.4,-8.5);
+\node[tag] at (20.6,-10.95) {referenciación Z};
+\draw[call] (12.7,-10.4)--node[tag,left]{relación de\\velocidades}(12.7,-12);
+
+% La devolución del control se produce por una función registrada, no por include.
+\draw[cb] (16.4,-6.25)--(16.85,-6.25)--(16.85,-3.25)--(16.4,-3.25);
+\node[tag,rotate=90,text=archOrange] at (16.85,-4.9) {callback};
+
+% Supervisión: dependencias reales hacia watchdog.
+\draw[support] (9,-3.25)--(8.4,-3.25)--(8.4,-3.65)--(-.5,-3.65)--(-.5,-11.55)--(6.3,-11.55)--(6.3,-12);
+\draw[support] (2.2,-9)--node[tag,left]{refresca}(2.2,-12);
+\draw[support] (20.4,-9.8)--(20.4,-10.55)--(5,-10.55)--(5,-12);
+
+% Leyenda y límites de la representación.
+\path[fill=archPaper,rounded corners=3pt] (18,-12) rectangle (25.4,-16.3);
+\node[anchor=north west,text=archInk,font=\sffamily\bfseries\small]
+  at (18.2,-12.15) {Referencia};
+\draw[call] (18.25,-12.83)--(19.05,-12.83);
+\node[anchor=west,font=\sffamily\fontsize{8.3}{10}\selectfont,text=archInk]
+  at (19.15,-12.83) {Llamada a una interfaz};
+\draw[support] (18.25,-13.3)--(19.05,-13.3);
+\node[anchor=west,font=\sffamily\fontsize{8.3}{10}\selectfont,text=archInk]
+  at (19.15,-13.3) {Servicio de supervisión};
+\draw[cb] (18.25,-13.77)--(19.05,-13.77);
+\node[anchor=west,font=\sffamily\fontsize{8.3}{10}\selectfont,text=archInk]
+  at (19.15,-13.77) {Invocación de callback};
+\node[anchor=north west,text width=6.9cm,align=left,text=archInk,
+  font=\sffamily\fontsize{8.2}{10.5}\selectfont] at (18.25,-14.15)
+  {\texttt{+} Interfaz expuesta por el módulo.\\
+   \texttt{-} Operación interna de \texttt{main.c}.\\[4pt]
+   };
+\end{tikzpicture}

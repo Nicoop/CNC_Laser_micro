@@ -1,0 +1,62 @@
+% Diagrama funcional unificado. Requiere tikz: arrows.meta y shapes.geometric.
+\begin{tikzpicture}[x=1cm,y=1cm,font=\sffamily\fontsize{9}{11}\selectfont,
+ box/.style={draw=sfBlue!65,fill=white,rounded corners=3pt,line width=.8pt,align=center,text=sfInk,text width=4.8cm,minimum height=1.15cm,inner sep=6pt},
+ choice/.style={diamond,draw=sfBlue!65,fill=sfBlue!5,aspect=2.8,align=center,text=sfInk,inner sep=2pt,text width=2.5cm,font=\sffamily\fontsize{8.5}{10}\selectfont},
+ arr/.style={-{Latex[length=2.3mm]},draw=sfBlue,line width=.85pt,rounded corners=3pt},
+ lab/.style={fill=white,inner sep=2pt,align=center,text=sfInk,font=\sffamily\fontsize{8.5}{10}\selectfont},
+ info/.style={align=left,text=sfInk,font=\sffamily\fontsize{8.5}{10.5}\selectfont}]
+\definecolor{sfBlue}{HTML}{365E88}
+\definecolor{sfTeal}{HTML}{287A79}
+\definecolor{sfOrange}{HTML}{B87523}
+\definecolor{sfInk}{HTML}{203247}
+
+\node[box,fill=sfBlue!7] (init) at (11.8,-1.2) {\textbf{Inicialización}\\Configurar periféricos y módulos\\Iniciar recepción UART\\Comprobar causa del reinicio};
+\node[box,draw=sfOrange,fill=sfOrange!6] (fail) at (22,-1.2) {\textbf{Fallo comprobado}\\\texttt{Error\_Handler()}: interrupciones\\deshabilitadas y bucle de error};
+\node[box,fill=sfBlue!7] (service) at (11.8,-4) {\textbf{Servicio del bucle principal}\\Atender mensajes\\Recibir y reconstruir líneas};
+\node[box] (timeout) at (22,-4) {\textbf{Ejecución X--Y}\\\textbf{del segmento pendiente}\\\texttt{flush\_pending\_move(false)}\\Retorno al finalizar o interrumpirse};
+\node[choice] (unlockq) at (11.8,-6.6) {¿La línea es \texttt{\$X}?};
+\node[box,draw=sfTeal,fill=sfTeal!5] (unlock) at (3,-6.6) {\textbf{Desbloquear}\\\texttt{alarm\_active = false}\\Responder \texttt{ok}};
+\node[choice] (alarmq) at (11.8,-8.8) {\mbox{¿Alarma activa?}};
+\node[box,draw=sfOrange,fill=sfOrange!6] (reject) at (3,-8.8) {\textbf{Bloqueo por alarma}\\Rechazar la línea: \texttt{error:9}\\Conservar \texttt{alarm\_active = true}};
+
+% La alarma es persistente, aunque el servicio del bucle continúa.
+\node[info,anchor=north,align=center,text width=4.8cm,text=sfOrange] (locknote) at (3,-10.2) {El bloqueo persiste entre líneas.\\Salida: recibir \texttt{\$X} y ejecutar\\el bloque \textbf{Desbloquear}.};
+\draw[draw=sfOrange!65,densely dotted,line width=.7pt] (reject.south) -- (locknote.north);
+
+\node[box,text width=11.8cm,minimum height=5.1cm,anchor=north] (process) at (11.8,-10.6) {};
+\node[anchor=north,align=center,text=sfBlue,font=\sffamily\bfseries\fontsize{10}{12}\selectfont] at (11.8,-10.85) {Procesamiento y ejecución de la instrucción};
+\node[info,anchor=north west,text width=11.15cm] at (6.25,-11.45) {
+\textbf{Comando \texttt{\$H}:} ejecutar \texttt{homing\_run()}; informar éxito o fallo.\\[5pt]
+\textbf{G-code:} interpretar la línea y actualizar los modos de operación.\\[5pt]
+\textbf{Movimiento X--Y:} ejecutar el segmento anterior, si corresponde, y almacenar el nuevo destino pendiente.\\[5pt]
+\textbf{Movimiento Z:} ejecutar \texttt{z\_axis\_move\_to()} cuando corresponda.\\[5pt]
+\textbf{Láser y motores:} aplicar las órdenes de potencia y habilitación.\\[5pt]
+Las llamadas bloqueantes retornan al punto de llamada. Al terminar el procesamiento se transmite la respuesta correspondiente.};
+
+\node[box,draw=sfOrange,fill=sfOrange!5,text width=5.5cm,minimum height=5.1cm,anchor=north] (irq) at (22,-8) {};
+\node[anchor=north,align=center,text=sfOrange,font=\sffamily\bfseries\fontsize{10}{12}\selectfont] at (22,-8.25) {Interrupción de un límite};
+\node[info,anchor=north west,text width=5.05cm] at (19.48,-8.85) {
+\textbf{Con homing inactivo y nivel bajo confirmado durante 200\,\textmu s:}\\[5pt]
+Solicitar la detención X--Y y Z.\\Deshabilitar láser y motores.\\Borrar el movimiento pendiente.\\Activar \texttt{alarm\_active}.\\Preparar el aviso al activar la alarma.\\[6pt]
+\textbf{Retornar al punto interrumpido.}\\La recepción UART continúa activa.};
+
+\draw[arr] (11.8,.65) -- (init.north);
+\draw[arr] (init.east) -- node[lab,above]{Error de inicialización} (fail.west);
+\draw[arr] (init.south) -- node[lab,left,text width=6.8cm]{Inicialización completada\\Si hubo reinicio por IWDG: activar alarma} (service.north);
+\draw[arr] (service.east) -- (15.8,-4) -- (15.8,-2.8) -- node[lab,above,text width=6.6cm]{Segmento pendiente y espera $>80$ ms} (22,-2.8) -- (timeout.north);
+\draw[arr] (timeout.south) -- (22,-5.2) -- node[lab,below]{Retorno al bucle} (16.2,-5.2) |- (service.south east);
+\draw[arr] (service.south) -- node[lab,right]{Línea no vacía completa} (unlockq.north);
+\draw[arr] (unlockq.west) -- node[lab,above]{Sí} (unlock.east);
+\draw[arr] (unlockq.south) -- node[lab,right]{No} (alarmq.north);
+\draw[arr] (alarmq.west) -- node[lab,above]{Sí} (reject.east);
+\draw[arr] (alarmq.south) -- node[lab,right]{No} (process.north);
+\draw[arr] (unlock.west) -- (.1,-6.6) -- (.1,-4) -- node[lab,above]{Continuar el servicio} (service.west);
+\draw[arr] (reject.west) -- (.1,-8.8) -- (.1,-6.6);
+\draw[arr] (process.south) -- (11.8,-16.1) -- (18.3,-16.1) -- (18.3,-5.8) -- (15.2,-5.8) -- (15.2,-4.65) -- (service.south east);
+\node[lab,rotate=90] at (18.3,-13.6) {Fin del procesamiento};
+% Enlace de información: no representa un salto del programa principal.
+\draw[densely dashed,draw=sfOrange,line width=.9pt,-{Latex[length=2mm]}] (irq.west) -- (18.65,-10.25) -- (18.65,-7.65) -- (15.5,-7.65) -- (15.5,-8.8) -- (alarmq.east);
+\node[lab,text=sfOrange,text width=5.1cm] at (21.8,-6.7) {Atención asíncrona.\\El enlace indica la condición\\modificada por la interrupción.};
+\node[info,anchor=north west,text width=24.8cm] at (.2,-16.8) {\textbf{Lectura del diagrama.} El bucle permanece activo aun con alarma: \texttt{\$X} libera el bloqueo de nuevas líneas. Las solicitudes de estado y bienvenida se atienden por el servicio de mensajes. La interrupción no reinicia el flujo ni vuelve a comprobar una línea ya iniciada.};
+\fill[sfBlue] (11.8,.65) circle (2.5pt);
+\end{tikzpicture}
