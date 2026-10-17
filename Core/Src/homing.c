@@ -23,6 +23,13 @@
  * estamos homeando a proposito, asi no confunde un toque intencional
  * del switch con un choque real */
 static volatile bool s_homing_active = false;
+/* la pone la parada de emergencia para cortar el homing en el acto */
+static volatile bool s_abort = false;
+
+void homing_abort(void)
+{
+    s_abort = true;
+}
 
 bool homing_is_active(void)
 {
@@ -82,6 +89,7 @@ static bool z_seek(uint32_t period_us, uint32_t max_steps)
 {
     HAL_GPIO_WritePin(Z_DIR_PORT, Z_DIR_PIN, GPIO_PIN_SET); /* con INVERT_Z_AXIS=1, esto es la direccion negativa logica */
     for (uint32_t i = 0; i < max_steps; i++) {
+        if (s_abort) return false; /* parada de emergencia */
         if (z_triggered()) return true;
         pulse(Z_STEP_PORT, Z_STEP_PIN);
         delay_us(period_us);
@@ -119,6 +127,7 @@ static bool x_seek(uint32_t period_us, uint32_t max_steps)
     HAL_GPIO_WritePin(MOTOR_A_DIR_PORT, MOTOR_A_DIR_PIN, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(MOTOR_B_DIR_PORT, MOTOR_B_DIR_PIN, GPIO_PIN_RESET);
     for (uint32_t i = 0; i < max_steps; i++) {
+        if (s_abort) return false; /* parada de emergencia */
         if (x_triggered()) return true;
         pulse(MOTOR_A_STEP_PORT, MOTOR_A_STEP_PIN);
         pulse(MOTOR_B_STEP_PORT, MOTOR_B_STEP_PIN);
@@ -155,6 +164,7 @@ static bool y_seek(uint32_t period_us, uint32_t max_steps)
     HAL_GPIO_WritePin(MOTOR_A_DIR_PORT, MOTOR_A_DIR_PIN, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(MOTOR_B_DIR_PORT, MOTOR_B_DIR_PIN, GPIO_PIN_SET);
     for (uint32_t i = 0; i < max_steps; i++) {
+        if (s_abort) return false; /* parada de emergencia */
         if (y_triggered()) return true;
         pulse(MOTOR_A_STEP_PORT, MOTOR_A_STEP_PIN);
         pulse(MOTOR_B_STEP_PORT, MOTOR_B_STEP_PIN);
@@ -188,11 +198,13 @@ static bool home_y(void)
 
 bool homing_run(void)
 {
+    s_abort = false;
     s_homing_active = true;
 
     /* el orden importa: hago z primero por seguridad (alejo el cabezal
      * de la cama antes de mover x/y), despues x, despues y */
     bool ok = home_z() && home_x() && home_y();
+    if (s_abort) ok = false; /* si la emergencia salto en medio, el homing no vale */
 
     s_homing_active = false;
     return ok;

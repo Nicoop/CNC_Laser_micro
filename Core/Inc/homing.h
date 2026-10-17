@@ -34,4 +34,9 @@ bool homing_run(void);
  * justamente lo que se espera que pase, no es un choque */
 bool homing_is_active(void);
 
+/* aborta el homing en curso (la llama la interrupcion de la parada de
+ * emergencia). los bucles de busqueda la miran en cada paso y salen
+ * enseguida, asi el homing no sigue empujando los motores */
+void homing_abort(void);
+
 #endif /* HOMING_H */

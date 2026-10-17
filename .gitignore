@@ -9,3 +9,4 @@ Release/
 *.map
 *.list
 *.su
+Debug/
