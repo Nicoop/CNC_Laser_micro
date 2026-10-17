@@ -75,6 +75,8 @@ UART_HandleTypeDef huart2;
 #define MSG_OK               "ok\r\n"
 #define MSG_ALARM_LIMIT_FMT  "ALARM:1\r\n[MSG:Final de carrera %c]\r\n[MSG:Motores libres. $X y M17]\r\n"
 #define MSG_WARN_FEED_FMT    "[MSG:F%d supera max. Uso F%d]\r\n"
+#define MSG_ALARM_ESTOP      "ALARM:3\r\n[MSG:Parada de emergencia]\r\n[MSG:Motores libres. Rearme, $X y $H]\r\n"
+#define MSG_ERR_ESTOP_HELD   "error:9\r\n[MSG:Emergencia apretada. Rearme]\r\n"
 #define MSG_ALARM_WATCHDOG   "ALARM:3\r\n[MSG:Reinicio por watchdog]\r\n[MSG:Posicion perdida. $X y $H]\r\n"
 #define MSG_ALARM_HOMING     "ALARM:9\r\n[MSG:Homing fallo]\r\n"
 #define MSG_ERR_UNKNOWN      "error:20\r\n[MSG:Comando no reconocido]\r\n"
@@ -104,6 +106,30 @@ static float g_off_y = 0.0f;
  * rebote mecanicamente y dispare la interrupcion varias veces por una
  * sola pulsada real */
 static volatile bool alarm_message_pending = false;
+
+/* ---- parada de emergencia (pulsador) ----
+ * el pulsador va a PB4 (EXTI4). se cablea NORMALMENTE CERRADO entre PB4 y
+ * GND, con el pull-up interno: en reposo el contacto lo mantiene en BAJO,
+ * al apretar (o si se corta un cable) el contacto se abre y el pull-up lo
+ * sube a ALTO. asi una falla del cableado tambien dispara la emergencia
+ * (a prueba de fallas). si prefieren un NA a GND, cambiar
+ * ESTOP_PRESSED_LEVEL a GPIO_PIN_RESET y el flanco a FALLING en el .ioc */
+#ifndef ESTOP_Pin
+#define ESTOP_Pin        GPIO_PIN_4
+#define ESTOP_GPIO_Port  GPIOB
+#endif
+#define ESTOP_PRESSED_LEVEL  GPIO_PIN_SET
+#define ESTOP_DEBOUNCE_US    1000U
+
+/* la isr la carga y el main la lee para mandar el mensaje una sola vez */
+static volatile bool estop_message_pending = false;
+/* true desde que se aprieta hasta que se manda $X con el pulsador liberado */
+static volatile bool estop_latched = false;
+
+static inline bool estop_pressed(void)
+{
+    return HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == ESTOP_PRESSED_LEVEL;
+}
 /* cual final de carrera disparo la alarma: 'X', 'Y' o 'Z' (lo carga la isr, lo imprime el main) */
 static volatile char alarm_limit_axis = '?';
 
@@ -241,6 +267,13 @@ int main(void)
       /* se perdio la posicion: dejo la maquina bloqueada hasta $X y $H */
       alarm_active = true;
       uart_tx(&huart2, (uint8_t*)MSG_ALARM_WATCHDOG, strlen(MSG_ALARM_WATCHDOG), 100);
+  }
+  if (estop_pressed()) {
+      /* si prenden la placa con la emergencia apretada, arranca en alarma */
+      estop_latched = true;
+      alarm_active = true;
+      motors_disable();
+      uart_tx(&huart2, (uint8_t*)MSG_ALARM_ESTOP, strlen(MSG_ALARM_ESTOP), 100);
   }
   stepper_init(&htim2); /* esto quedo duplicado de una version anterior, no hace falta pero tampoco molesta */
   HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
@@ -613,7 +646,16 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : ESTOP_Pin (PB4) - parada de emergencia, flanco ascendente, pull-up */
+  GPIO_InitStruct.Pin = ESTOP_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(ESTOP_GPIO_Port, &GPIO_InitStruct);
+
   /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
+
   HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
@@ -664,6 +706,11 @@ static void format_float3(float value, char *out, size_t out_size)
  * despues si hace falta) */
 static void send_status_report(UART_HandleTypeDef *huart)
 {
+    /* si todavia hay un tx en curso, lo dejo para la proxima vuelta. esto va
+     * ANTES de armar el texto: msg es static y el tx anterior lo sigue
+     * leyendo, si lo pisara saldria el reporte mezclado */
+    if (huart->gState != HAL_UART_STATE_READY) { status_report_pending = 1; return; }
+
     float x, y;
     stepper_get_position(&x, &y);
     char xs[16], ys[16], wxs[16], wys[16];
@@ -673,8 +720,6 @@ static void send_status_report(UART_HandleTypeDef *huart)
     format_float3(g_off_x, wxs, sizeof(wxs));
     format_float3(g_off_y, wys, sizeof(wys));
     int len = snprintf(msg, sizeof(msg), "<%s|MPos:%s,%s,0.000|FS:0,0|WCO:%s,%s,0.000>\r\n", alarm_active ? "Alarm" : "Idle", xs, ys, wxs, wys);
-    /* si todavia hay un tx en curso, lo dejo para la proxima vuelta */
-    if (huart->gState != HAL_UART_STATE_READY) { status_report_pending = 1; return; }
     /* por interrupcion: no frena al micro 3.5 ms (eso causaba tirones) */
     HAL_UART_Transmit_IT(huart, (uint8_t*)msg, len);
 }
@@ -709,6 +754,10 @@ static void service_realtime(void)
             alarm_limit_axis);
         uart_tx(&huart2, (uint8_t*)alarm, n, 100);
     }
+    if (estop_message_pending) {
+        estop_message_pending = false;
+        uart_tx(&huart2, (uint8_t*)MSG_ALARM_ESTOP, strlen(MSG_ALARM_ESTOP), 100);
+    }
     if (welcome_pending) {
         welcome_pending = 0;
         g_off_x = 0.0f; /* un reset (ctrl-x) borra el offset de trabajo */
@@ -737,6 +786,16 @@ static void flush_pending_move(bool exit_at_cruise)
     if (!g_pending.valid) return;
     static bool last_entered_at_cruise = false;
 
+    /* si hay alarma (final de carrera), no ejecuto nada. sin esto, una linea
+     * que quedaba cargada como pendiente justo cuando saltaba la alarma se
+     * ejecutaba 80 ms despues (por el timeout del while principal) y
+     * motors_enable() volvia a enganchar los motores y los movia */
+    if (alarm_active) {
+        g_pending.valid = false;
+        last_entered_at_cruise = false;
+        return;
+    }
+
     /* el estado del laser para este movimiento se fija ACA, justo antes
      * de ejecutarlo, y no cuando llego la linea. rapid = es un g0 (la
      * salida va a 0). has_laser_s = la linea traia un s nuevo (el s es
@@ -746,7 +805,9 @@ static void flush_pending_move(bool exit_at_cruise)
     motors_enable();
     stepper_move_to(g_pending.target_x, g_pending.target_y, g_pending.feed,
                      last_entered_at_cruise, exit_at_cruise);
-    last_entered_at_cruise = exit_at_cruise;
+    /* si la alarma corto este movimiento, el proximo (despues de $X) tiene que
+     * arrancar con rampa, no directo a velocidad de crucero */
+    last_entered_at_cruise = alarm_active ? false : exit_at_cruise;
     g_pending.valid = false;
 }
 
@@ -763,6 +824,12 @@ static void process_gcode_line(char *raw_line)
      * primero que nada, antes incluso de ver si hay una alarma activa,
      * porque si no nunca se podria salir de la alarma */
     if (raw_line[0] == '$' && raw_line[1] == 'X' && raw_line[2] == '\0') {
+        /* con la emergencia todavia apretada no se puede desbloquear */
+        if (estop_pressed()) {
+            uart_tx(&huart2, (uint8_t*)MSG_ERR_ESTOP_HELD, strlen(MSG_ERR_ESTOP_HELD), 100);
+            return;
+        }
+        estop_latched = false;
         alarm_active = false;
         uart_tx(&huart2, (uint8_t*)MSG_OK, 4, 100);
         return;
@@ -797,6 +864,8 @@ static void process_gcode_line(char *raw_line)
                 g_off_x = 0.0f; /* despues de homing el cero anterior ya no vale */
                 g_off_y = 0.0f;
                 uart_tx(&huart2, (uint8_t*)MSG_OK, 4, 100);
+            } else if (alarm_active) {
+                /* el homing lo corto una emergencia: ya se avisa aparte, no es un "homing fallo" */
             } else {
                 const char *err = MSG_ALARM_HOMING;
                 uart_tx(&huart2, (uint8_t*)err, strlen(err), 100);
@@ -1096,6 +1165,31 @@ static bool limit_still_low(uint16_t pin, uint32_t window_us)
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
+    /* parada de emergencia: va ANTES del chequeo de homing, porque tiene
+     * que funcionar siempre, tambien en medio del homing */
+    if (GPIO_Pin == ESTOP_Pin) {
+        /* antirrebote: tiene que seguir apretado ESTOP_DEBOUNCE_US */
+        uint32_t start = DWT->CYCCNT;
+        uint32_t cycles = ESTOP_DEBOUNCE_US * (SystemCoreClock / 1000000U);
+        while ((DWT->CYCCNT - start) < cycles) {
+            if (!estop_pressed()) return; /* fue un pico, no una pulsacion real */
+        }
+
+        stepper_emergency_stop();
+        z_axis_emergency_stop();
+        homing_abort();
+        laser_disable();
+        g_pending.valid = false;
+        motors_disable(); /* motores sin corriente */
+
+        if (!estop_latched) {
+            estop_latched = true;
+            estop_message_pending = true; /* el mensaje lo manda el main */
+        }
+        alarm_active = true;
+        return;
+    }
+
     if (homing_is_active()) {
         return;
     }

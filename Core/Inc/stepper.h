@@ -5,8 +5,9 @@
 #include <stdbool.h>
 
 /* velocidad maxima permitida de la maquina en mm/min. si el gcode pide
- * una F mas alta, main.c entra en alarma (igual que un final de carrera)
- * y stepper.c la recorta como seguro extra */
+ * una F mas alta, main.c avisa con un [MSG:...] y la recorta a este valor
+ * (no hay alarma, el trabajo sigue). stepper.c la recorta tambien como
+ * seguro extra */
 #ifndef MAX_FEED_MM_MIN
 #define MAX_FEED_MM_MIN 3000.0f
 #endif
