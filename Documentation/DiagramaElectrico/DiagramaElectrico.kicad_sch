@@ -7,6 +7,7 @@
 	(title_block
 		(title "Esquemático Eléctrico de CNC Laser")
 		(date "2026-10-08")
+		(rev "2026-10-17")
 		(company "Microcontroladores y Electrónica de Potencia - FING - UNCuyo")
 	)
 	(lib_symbols

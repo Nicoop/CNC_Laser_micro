@@ -4,7 +4,14 @@
 #include "stm32f4xx_hal.h"
 #include <stdbool.h>
 
-/* mecanica del eje z no tiene nada especial como las demas */
+/* ========================================================== */
+/* =================== Mecanica del eje Z =================== */
+/* ========================================================== */
+
+/* Este eje es más simple que <X,Y> o <A,B> debido a que no sigue la lógica de la
+ * cinematica CoreXY. Cuenta con un solo motor (bah, 2 motores pero en paralelo al mismo driver asi
+ * que para el firmware es como si fuera uno) moviendo un husillo
+ */
 #define Z_MOTOR_STEP_ANGLE_DEG   1.8f
 #define Z_STEPS_PER_REV_FULL     (360.0f / Z_MOTOR_STEP_ANGLE_DEG)  /* 200 */
 #define Z_MICROSTEPPING          16
@@ -16,33 +23,44 @@
 #define Z_DEFAULT_FEED_MM_S      3.0f
 #define Z_MIN_STEP_PERIOD_US     80
 
-/* invertir el sentido fisico de z sin recablear nada.*/
+/* Permite invertir el sentido fisico de z sin recablear nada.
+ * @note:  esto lo necesito porque el switch
+ *         de home de z queda arriba, y quiero que mover hacia
+ *         la zona de trabajo (hacia abajo) sea en positivo
+ */
 #define INVERT_Z_AXIS            1
 
 /* limite del area de trabajo en mm, valido recien despues de hacer $H */
 #define WORKSPACE_Z_MAX_MM       130.0f
 
-/* pines step/dir del eje z  */
+/* pines step/dir del eje z (mismo conector morpho que los de x/y) */
 #define Z_STEP_PORT   GPIOC
 #define Z_STEP_PIN    GPIO_PIN_4
 #define Z_DIR_PORT    GPIOC
 #define Z_DIR_PIN     GPIO_PIN_5
 
-/* llamar una vez en main() */
+/* llamar una vez en main(), despues de MX_GPIO_Init() y de crear el
+ * timer handle que se va a usar para los pasos de z */
 void z_axis_init(TIM_HandleTypeDef *step_timer);
 
-/* mueve la cama a z_mm */
+/* Mueve la cama a <z_mm> (posicion absoluta), a velocidad <feed_mm_min> [mm/min].
+ * Es una función bloqueante, igual que "stepper_move_to()". No tiene el tema de
+ * <enter at cruise>/<exit at cruise> porque z normalmente no se mueve en una
+ * secuencia larga de micro pasos como <X/Y> en el raster
+ */
 void z_axis_move_to(float z_mm, float feed_mm_min);
 
 void z_axis_get_position(float *z_mm);
 
-/* fuerza la posicion logica sin mover nada  */
+/* Fuerza la posicion logica sin mover nada (usar solo justo despues
+ * de homing) */
 void z_axis_set_position(float z_mm);
 
-/* llamar en la isr del timer configurado */
+/* Llamar en la ISR del timer configurado en "z_axis_init()" */
 void z_axis_timer_isr(void);
 
-/* corta el movimiento en curso al toque */
+/* Corta el movimiento en curso al toque, para la interrupcion de
+ * emergencia de los finales de carrera */
 void z_axis_emergency_stop(void);
 
 #endif /* Z_AXIS_H */
